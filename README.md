@@ -200,10 +200,24 @@ Two roles, both defined once in [`tasks/models.py`](tasks/models.py) and
 enforced once in [`tasks/permissions.py`](tasks/permissions.py):
 
 - **Owner** — the user in `Project.owner`. The only user who may edit or delete
-  the project, or create, edit, and delete tasks inside it.
-- **Member** — the owner, *or* any user assigned at least one task in the
-  project (`Project.objects.visible_to()`). Members may view the project and
-  **all** of its tasks, not only the ones assigned to them.
+  the project, or create, edit, and delete tasks inside it. Set from
+  `request.user`, never from form data.
+- **Member** — the owner, *or* a user listed in `Project.members`, *or* any
+  user assigned at least one task in the project
+  (`Project.objects.visible_to()`). Members may view the project and **all** of
+  its tasks, not only the ones assigned to them, and may comment.
+
+Membership has two routes on purpose:
+
+| Route | How |
+| --- | --- |
+| **Explicitly** | The owner ticks users in the project form's *Members* list. Use this to give someone read access without handing them work. |
+| **Implicitly** | Assigning someone a task makes them a member of that project automatically — no second step. |
+
+Neither is stored twice: `members` is a plain `ManyToManyField`, and the
+assignment route is *derived* from the task rows each time, so clearing an
+assignment revokes access. The owner is a member implicitly and is never stored
+in `members` — the form does not even offer them as a checkbox.
 
 | Action | Owner | Member | Other user | Anonymous |
 | --- | :-: | :-: | :-: | :-: |
@@ -320,9 +334,11 @@ Decisions made where the brief left room; kept here as they accumulate.
   the login form.
 - **Logging out is a POST.** `LogoutView` has rejected GET since Django 5.0, so
   the header uses a small form rather than a link.
-- **Membership is "owner, or assigned a task in the project".** The brief left
-  the definition open. This one needs no extra model or join table: assigning a
-  task is already the act that brings someone into a project.
+- **Membership is "owner, explicitly a member, or assigned a task".** The brief
+  left the definition open and its example was "owner or anyone assigned a task
+  in the project". That alone works, but it has no way to give a teammate read
+  access without handing them work, so `Project.members` was added as a second,
+  explicit route. Both are honoured by one `visible_to()` query.
 - **Creating a task is owner-only.** The brief specifies owner-only edit and
   delete but is silent on create. Letting a member add a task they could not
   then change or remove would be the odd case, so create follows the same rule.

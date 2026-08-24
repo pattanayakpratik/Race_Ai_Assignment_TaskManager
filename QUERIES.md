@@ -222,6 +222,12 @@ This is the part worth reading. `visible_to()` joins `tasks` to work out project
 membership, and the count annotation aggregates over `tasks` as well. Chaining
 them gives **wrong numbers in both directions**, silently.
 
+(`visible_to()` also joins `members`, a second to-many relation, which is why
+its `distinct()` is load-bearing: a user who is both an explicit member and an
+assignee would otherwise match several times over and repeat in the project
+list. `test_project_appears_once_for_a_user_who_is_both_member_and_assignee`
+covers exactly that case.)
+
 Measured against a project holding **4 To Do / 1 In Progress / 1 Done**, viewed
 by a user who is assigned 3 of those tasks:
 
@@ -284,7 +290,7 @@ join onto.
 | Page | Renders per row | Optimisation |
 | --- | --- | --- |
 | Project list | owner, per-status counts | `select_related('owner')` + annotated counts |
-| Project detail | each task's assignee | `prefetch_related(Prefetch('tasks', queryset=Task.objects.select_related('assigned_to')))` |
+| Project detail | each task's assignee, each member | `prefetch_related(Prefetch('tasks', queryset=Task.objects.select_related('assigned_to')), 'members')` |
 | Task detail | each comment's author | `prefetch_related(Prefetch('comments', queryset=Comment.objects.select_related('author')))` |
 | Dashboard | each card's project | `select_related('project')` |
 
@@ -302,7 +308,7 @@ Query counts per page, then with every collection tripled (10 → 30 projects,
 | Dashboard | 4 | 4 | constant |
 | Dashboard (overdue filter) | 4 | 4 | constant |
 | Project list | 3 | 3 | constant |
-| Project detail | 5 | 5 | constant |
+| Project detail | 6 | 6 | constant |
 | Task detail | 4 | 4 | constant |
 
 Two of the four on most pages are the session and user lookups from

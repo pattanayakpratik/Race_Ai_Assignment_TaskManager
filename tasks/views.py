@@ -99,7 +99,10 @@ class ProjectDetailView(ProjectMemberRequiredMixin, DetailView):
             Prefetch(
                 'tasks',
                 queryset=Task.objects.select_related('assigned_to'),
-            )
+            ),
+            # `members` is many-to-many; one extra query for the whole list,
+            # not one per member rendered.
+            'members',
         )
 
     def get_object(self, queryset=None):
@@ -113,6 +116,8 @@ class ProjectDetailView(ProjectMemberRequiredMixin, DetailView):
         context['can_edit'] = self.project.is_owned_by(self.request.user)
         # One GROUP BY query for the whole breakdown.
         context['status_counts'] = self.project.status_counts()
+        # Reads the prefetch cache.
+        context['members'] = self.project.members.all()
         return context
 
 

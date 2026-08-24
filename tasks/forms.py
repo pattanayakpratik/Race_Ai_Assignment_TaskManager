@@ -8,8 +8,28 @@ class ProjectForm(forms.ModelForm):
         model = Project
         # `owner` is deliberately absent: it is set from request.user in the
         # view, so a crafted POST cannot create a project owned by someone else.
-        fields = ['name', 'description']
-        widgets = {'description': forms.Textarea(attrs={'rows': 4})}
+        # `members` IS user-settable -- but only the owner ever reaches this
+        # form, because the update view is owner-only.
+        fields = ['name', 'description', 'members']
+        widgets = {
+            'description': forms.Textarea(attrs={'rows': 4}),
+            'members': forms.CheckboxSelectMultiple,
+        }
+        help_texts = {
+            'members': 'Members can view the project and all of its tasks, '
+                       'and comment on them. Only you can edit or delete '
+                       'anything. Anyone you assign a task to becomes a '
+                       'member automatically.',
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The owner is a member implicitly, so offering them as a checkbox
+        # would be confusing and would let them be "removed" with no effect.
+        if self.instance.owner_id:
+            self.fields['members'].queryset = (
+                self.fields['members'].queryset.exclude(pk=self.instance.owner_id)
+            )
 
 
 class TaskForm(forms.ModelForm):

@@ -21,7 +21,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
-from .forms import CommentForm
+from .forms import CommentForm, ProjectForm
 from .models import Comment, Project, Task
 from .views import ProjectDetailView, TaskDetailView
 
@@ -1035,3 +1035,153 @@ class NPlusOneTests(TestCase):
             self.assertEqual(
                 len([t.assigned_to.username for t in fetched.tasks.all()]), 10
             )
+
+
+class ExplicitMembershipTests(TestCase):
+    """A user can be added to a project directly, without being given a task."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user('m_owner', password='pw-for-tests-1')
+        cls.invited = User.objects.create_user('m_invited', password='pw-for-tests-2')
+        cls.assignee = User.objects.create_user('m_assignee', password='pw-for-tests-3')
+        cls.stranger = User.objects.create_user('m_stranger', password='pw-for-tests-4')
+
+        cls.project = Project.objects.create(name='Apollo', owner=cls.owner)
+        cls.task = Task.objects.create(
+            title='Some work', due_date=DUE, project=cls.project,
+            assigned_to=cls.assignee,
+        )
+
+    def detail_url(self):
+        return reverse('project-detail', args=[self.project.pk])
+
+    # -- the new path -------------------------------------------------------
+
+    def test_explicit_member_can_view_without_being_assigned_anything(self):
+        """The gap this feature closes."""
+        self.client.force_login(self.invited)
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 403)
+
+        self.project.members.add(self.invited)
+
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 200)
+        self.assertFalse(Task.objects.filter(assigned_to=self.invited).exists())
+
+    def test_removing_a_member_revokes_access(self):
+        self.project.members.add(self.invited)
+        self.client.force_login(self.invited)
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 200)
+
+        self.project.members.remove(self.invited)
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 403)
+
+    def test_assignment_still_confers_membership(self):
+        """The original rule must keep working alongside the new one."""
+        self.client.force_login(self.assignee)
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 200)
+        self.assertNotIn(self.assignee, self.project.members.all())
+
+    def test_member_can_view_and_comment_but_not_edit(self):
+        self.project.members.add(self.invited)
+        self.client.force_login(self.invited)
+
+        self.assertEqual(
+            self.client.get(reverse('task-detail', args=[self.task.pk])).status_code, 200
+        )
+        response = self.client.post(
+            reverse('comment-create', args=[self.task.pk]), {'body': 'hello'}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Comment.objects.filter(author=self.invited).exists())
+
+        for url in (reverse('project-update', args=[self.project.pk]),
+                    reverse('task-update', args=[self.task.pk]),
+                    reverse('task-delete', args=[self.task.pk])):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.post(url, {}).status_code, 403)
+
+    def test_stranger_still_refused(self):
+        self.client.force_login(self.stranger)
+        self.assertEqual(self.client.get(self.detail_url()).status_code, 403)
+
+    # -- managing members through the form ----------------------------------
+
+    def test_owner_can_add_members_through_the_project_form(self):
+        self.client.force_login(self.owner)
+        response = self.client.post(
+            reverse('project-update', args=[self.project.pk]),
+            {'name': 'Apollo', 'description': '', 'members': [self.invited.pk]},
+        )
+        self.assertRedirects(response, self.detail_url())
+        self.assertEqual(list(self.project.members.all()), [self.invited])
+
+    def test_members_can_be_set_when_creating_a_project(self):
+        self.client.force_login(self.owner)
+        self.client.post(reverse('project-create'), {
+            'name': 'Gemini', 'description': '', 'members': [self.invited.pk],
+        })
+        created = Project.objects.get(name='Gemini')
+        self.assertEqual(created.owner, self.owner)
+        self.assertEqual(list(created.members.all()), [self.invited])
+
+    def test_non_owner_cannot_add_themselves_as_a_member(self):
+        """The owner-only guard on the update view is what protects this."""
+        self.client.force_login(self.stranger)
+        response = self.client.post(
+            reverse('project-update', args=[self.project.pk]),
+            {'name': 'Apollo', 'description': '', 'members': [self.stranger.pk]},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(list(self.project.members.all()), [])
+
+    def test_owner_is_not_offered_as_a_member_checkbox(self):
+        """The owner is a member implicitly; ticking them would be meaningless."""
+        form = ProjectForm(instance=self.project)
+        self.assertNotIn(self.owner, form.fields['members'].queryset)
+        self.assertIn(self.invited, form.fields['members'].queryset)
+
+    # -- the queryset must not double-count ---------------------------------
+
+    def test_project_appears_once_for_a_user_who_is_both_member_and_assignee(self):
+        """Two to-many joins OR'd together: distinct() has to hold."""
+        self.project.members.add(self.assignee)
+        Task.objects.create(
+            title='Another', due_date=DUE, project=self.project,
+            assigned_to=self.assignee,
+        )
+
+        visible = list(Project.objects.visible_to(self.assignee))
+        self.assertEqual(visible.count(self.project), 1)
+
+        self.client.force_login(self.assignee)
+        listed = self.client.get(reverse('project-list')).context['projects']
+        self.assertEqual(list(listed).count(self.project), 1)
+
+    def test_status_counts_stay_correct_with_the_extra_join(self):
+        """visible_to() now joins two to-many relations; counts must survive."""
+        self.project.members.add(self.assignee)
+        Task.objects.create(title='b', due_date=DUE, project=self.project,
+                            status=Task.Status.DONE)
+        Task.objects.create(title='c', due_date=DUE, project=self.project,
+                            status=Task.Status.DONE)
+
+        row = Project.objects.visible_to_with_counts(self.assignee).get(pk=self.project.pk)
+        self.assertEqual(row.todo_count, 1)   # the original assigned task
+        self.assertEqual(row.done_count, 2)
+
+    def test_project_detail_does_not_scale_with_member_count(self):
+        extra = [
+            User.objects.create_user(f'bulk{i}', password='pw-for-tests-5')
+            for i in range(10)
+        ]
+        self.project.members.add(*extra[:5])
+        self.client.force_login(self.owner)
+        with CaptureQueriesContext(connection) as before:
+            self.client.get(self.detail_url())
+
+        self.project.members.add(*extra[5:])
+        with CaptureQueriesContext(connection) as after:
+            self.client.get(self.detail_url())
+
+        self.assertEqual(len(before), len(after))

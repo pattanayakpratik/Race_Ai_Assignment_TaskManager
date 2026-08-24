@@ -9,14 +9,16 @@ class ProjectQuerySet(models.QuerySet):
     """Membership rules live here so views and templates cannot drift apart."""
 
     def visible_to(self, user):
-        """Projects the user owns, or is assigned at least one task in.
+        """Projects the user can see: owned, explicitly a member of, or
+        assigned at least one task in.
 
         This is the definition of "project member" used throughout the app.
-        `distinct()` is required because the join to tasks yields one row per
-        matching task.
+        `distinct()` is essential: both `members` and `tasks` are to-many, so
+        the OR'd joins yield one row per matching member AND per matching task
+        -- a user who is both would otherwise appear several times over.
         """
         return self.filter(
-            Q(owner=user) | Q(tasks__assigned_to=user)
+            Q(owner=user) | Q(members=user) | Q(tasks__assigned_to=user)
         ).distinct()
 
     def owned_by(self, user):
@@ -121,6 +123,14 @@ class Project(models.Model):
         on_delete=models.CASCADE,
         related_name='projects',
     )
+    # Explicit membership, so a teammate can be given read access without
+    # having to be handed a task first. The owner is a member implicitly and
+    # is never stored here.
+    members = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name='member_projects',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -140,8 +150,16 @@ class Project(models.Model):
         return self.owner_id == user.pk
 
     def is_member(self, user):
-        """May this user view the project and its tasks?"""
-        return self.is_owned_by(user) or self.tasks.filter(assigned_to=user).exists()
+        """May this user view the project and its tasks?
+
+        Ordered cheapest-first and short-circuiting: the owner check is free
+        (the FK id is already loaded), so the common case costs no queries.
+        """
+        return (
+            self.is_owned_by(user)
+            or self.members.filter(pk=user.pk).exists()
+            or self.tasks.filter(assigned_to=user).exists()
+        )
 
     def status_counts(self):
         """This project's task counts per status, as one row per status.

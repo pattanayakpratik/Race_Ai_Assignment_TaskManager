@@ -9,6 +9,19 @@
   <p>Owned by <strong>{{ project.owner.username }}</strong></p>
   {% if project.description %}<p>{{ project.description|linebreaksbr }}</p>{% endif %}
 
+  {# Prefetched in the view -- no query per member. #}
+  <p class="counts">
+    Members:
+    {% for member in members %}{{ member.username }}{% if not forloop.last %}, {% endif %}
+    {% empty %}<span class="empty">none yet</span>{% endfor %}
+    {% if can_edit %}
+      &middot; <a href="{% url 'project-update' project.pk %}">Manage</a>
+    {% endif %}
+  </p>
+  <p class="empty">
+    Anyone assigned a task below can also see this project.
+  </p>
+
   {# Buttons are hidden for non-owners as a convenience only; the views
      enforce the rule independently of what is rendered here. #}
   {% if can_edit %}
