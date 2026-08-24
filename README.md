@@ -4,6 +4,21 @@ A small multi-user task manager built with Django and MySQL: users create
 projects, add tasks to them, assign tasks to teammates, comment on them, and see
 a dashboard of "my tasks".
 
+**[QUERIES.md](QUERIES.md)** is the write-up of the four MySQL/ORM requirements
+— ORM calls, generated SQL, `EXPLAIN` output, and the reasoning behind the
+index.
+
+## What it does
+
+- **Auth** — register, log in, log out, on `django.contrib.auth`.
+- **Projects and tasks** — full CRUD, with ownership enforced at the view
+  layer.
+- **Assignment** — a task can be assigned to any user; assignment is what makes
+  someone a project member.
+- **Comments** — append-only, open to anyone who can view the task.
+- **Dashboard** — the current user's tasks in To Do / In Progress / Done
+  columns, with an Overdue filter.
+
 ## Stack
 
 | Component | Version |
@@ -98,7 +113,7 @@ python manage.py runserver
 The app is then at http://127.0.0.1:8000/ and the admin at
 http://127.0.0.1:8000/admin/.
 
-### 5. Run the tests (optional)
+### 5. Run the tests
 
 ```bash
 python manage.py test
@@ -112,6 +127,26 @@ yourself:
 
 ```sql
 GRANT ALL PRIVILEGES ON `test\_%`.* TO 'taskmanager'@'%';
+```
+
+The suite is 89 tests, and it is where the brief's harder claims are actually
+checked: every mutating endpoint is POSTed as owner, member, outsider and
+anonymous; the N+1 tests assert query counts do not grow when a list does; and
+the status-count tests pin the wrong answers the naive ORM chaining produces.
+
+## Project layout
+
+```
+config/           settings, root URLconf
+accounts/         registration view + auth URLs (login/logout are Django's)
+tasks/
+  models.py       Project, Task, Comment + the queryset methods
+  permissions.py  view-layer permission mixins
+  views.py        CRUD, dashboard, comments
+  forms.py        forms, minus the fields that must not be user-settable
+  tests.py        89 tests
+templates/        base.html, registration/, tasks/
+docker/mysql-init/  runs once on first MySQL boot (test-database grants)
 ```
 
 ## Routes
@@ -229,138 +264,26 @@ Both have tests. `python manage.py test` runs the full suite: every mutating
 endpoint is POSTed as owner, member, outsider, and anonymous, and each test
 asserts the database is *unchanged*, not merely that a 403 came back.
 
-## Required queries
+## Data layer and queries
 
-Both live as queryset methods on [`tasks/models.py`](tasks/models.py), so there
-is one definition each and views compose against it.
+The four MySQL/ORM requirements — the overdue query, the per-project status
+counts, N+1 avoidance, and the one deliberate index — are written up in
+**[QUERIES.md](QUERIES.md)**, with the ORM call, the generated SQL, `EXPLAIN`
+output, and the reasoning for each.
 
-### Overdue tasks
+The short version:
 
-```python
-Task.objects.overdue()                        # every overdue task
-Task.objects.assigned_to_user(user).overdue() # mine, as the dashboard uses it
-```
+| | |
+| --- | --- |
+| **Overdue tasks** | `Task.objects.overdue()` — `due_date < today` and status not Done. Surfaced as the dashboard's Overdue filter. Written as `status__in=[...]`, not `!= done`, which is what lets MySQL use the index: 1,457 rows examined instead of 49,989. |
+| **Status counts** | `project.status_counts()` (one `GROUP BY`) and `Project.objects.with_status_counts()` (conditional `COUNT(CASE WHEN ...)` across a list). Counted in SQL; Python only fills a zero for statuses with no rows. |
+| **N+1** | `select_related` for forward FKs, `prefetch_related(Prefetch(..., queryset=...select_related(...)))` for reverse ones. Every page is a constant number of queries — 3 to 5 — unchanged when its collections triple. |
+| **Index** | One composite index on `Task(status, due_date)`, chosen for the overdue query and justified with measurements in QUERIES.md. |
 
-```sql
-SELECT ... FROM `tasks_task`
-WHERE (`due_date` < '2026-08-25' AND `status` IN ('todo', 'in_progress'))
-ORDER BY `due_date` ASC, `id` ASC
-```
-
-```
-EXPLAIN: type=range  key=task_status_due_date_idx  Using index condition
-```
-
-Surfaced as an **Overdue filter on the dashboard** (`/?filter=overdue`), with a
-count in the toggle and a red badge on late cards. The badge uses an
-`is_overdue` property that re-states the same rule in Python on an
-already-loaded row, so it costs no queries; a test asserts the property and the
-queryset never disagree.
-
-Written as `status__in=[...]` rather than `.exclude(status=DONE)` — that is
-what makes the index usable, and it is measured in the index section below. The
-status list comes from `Task.open_statuses()`, derived from the choices, so
-adding a status keeps the query correct.
-
-### Per-project status counts
-
-For one project (used on the project detail page):
-
-```python
-Task.objects.filter(project=project).values('status').annotate(count=Count('id'))
-```
-
-```sql
-SELECT `status`, COUNT(`id`) AS `count` FROM `tasks_task`
-WHERE `project_id` = 46 GROUP BY 1 ORDER BY 1 ASC
-```
-
-Three rows come back for six tasks — the database groups and counts; Python
-only fills in a zero for any status with no tasks, and orders by the choices.
-
-For a list of projects (used on the project list page), conditional
-aggregation puts every count in the same query:
-
-```python
-Project.objects.with_status_counts()   # todo_count, in_progress_count, done_count
-```
-
-```sql
-SELECT `tasks_project`.*,
-       COUNT(CASE WHEN `tasks_task`.`status` = 'todo' THEN `tasks_task`.`id` END) AS `todo_count`,
-       COUNT(CASE WHEN `tasks_task`.`status` = 'in_progress' THEN ... END) AS `in_progress_count`,
-       COUNT(CASE WHEN `tasks_task`.`status` = 'done' THEN ... END) AS `done_count`
-FROM `tasks_project` LEFT OUTER JOIN `tasks_task` ON (...)
-GROUP BY `tasks_project`.`id`
-```
-
-The whole project list is **3 queries** regardless of how many projects it
-holds, pinned by `assertNumQueries`.
-
-#### The trap this hides
-
-`visible_to()` joins `tasks` to work out membership, and the count annotation
-aggregates over `tasks` too. Combining them directly gives wrong numbers **in
-both directions**. Measured against a project holding 4 To Do / 1 In Progress /
-1 Done, viewed by a user assigned 3 of those tasks:
-
-| Expression | todo / in_progress / done | |
-| --- | --- | --- |
-| `with_status_counts()` alone | 4 / 1 / 1 | correct |
-| `visible_to(u).with_status_counts()` | 3 / 0 / 0 | **undercount** — the annotation reuses the membership join, so it only counts rows that satisfied the assignment filter |
-| `with_status_counts().visible_to(u)` | 12 / 3 / 3 | **overcount** — the join fans out to one row per assignment, tripling every count |
-| `visible_to_with_counts(u)` | 4 / 1 / 1 | correct |
-
-`visible_to_with_counts()` resolves membership to a set of ids first, which
-leaves the annotation a single clean join. Both wrong forms are pinned by a test
-(`test_naive_chaining_is_what_we_avoided`) so a future refactor back to them
-fails loudly rather than silently reporting bad numbers.
-
-## The one deliberate index
-
-Beyond the primary keys and the indexes Django creates automatically for foreign
-keys, the schema adds exactly one index, on `Task`:
-
-```python
-models.Index(fields=['status', 'due_date'], name='task_status_due_date_idx')
-```
-
-It exists to serve the **overdue-tasks query** — open tasks whose `due_date` has
-passed — which is the app's hottest non-trivial read (it backs the dashboard's
-Overdue filter) and the only required query that filters on something other than
-a foreign key. `(status, due_date)` is the right order because `status` is
-matched against discrete values and `due_date` is a range: MySQL can only use a
-range column as a key after every preceding column is pinned to constants.
-
-**Measured on 50,000 tasks** (~2.9% overdue-and-open, the realistic shape — most
-tasks end up Done and most open work is not yet due):
-
-| Query form | Index chosen | Rows examined | Extra |
-| --- | --- | --- | --- |
-| `.exclude(status=DONE)` | none | 49,989 | `Using where` |
-| `.filter(status__in=[TODO, IN_PROGRESS])` | `task_status_due_date_idx` | **1,457** | `Using index condition` |
-| same, `COUNT(*)` only | `task_status_due_date_idx` | 1,457 | `Using index` (covering) |
-| same, with `IGNORE INDEX` | none | 49,989 | `Using where` |
-
-Two things that surfaced while measuring, both worth stating plainly:
-
-1. **Phrasing decides whether the index is used at all.** `!= 'done'` is an
-   inequality on the leading column, so MySQL cannot reduce it to discrete
-   values and `due_date` becomes unusable as a second key — it falls back to a
-   full scan. Written as `status__in=[TODO, IN_PROGRESS]` it examines 1,457 rows
-   instead of 49,989, a 34x reduction. The reusable query helper therefore uses
-   `status__in`, not `exclude`.
-2. **Selectivity decides whether the index is worth it.** On an earlier,
-   uniformly-random seed where 33% of rows matched, MySQL correctly ignored the
-   index — at that hit rate a scan beats index lookups plus row fetches. The
-   index pays off precisely because overdue-and-open is a small minority in real
-   data, which is the case worth optimising for.
-
-Runner-up considered and rejected: `(assigned_to, status, due_date)`, which
-would also serve the dashboard's "my tasks". It was rejected because
-`assigned_to` already carries an automatic FK index that handles the dashboard's
-equality filter, and because the overdue query is defined project-wide rather
-than per-user, so a leading `assigned_to` column would not apply to it.
+Two traps that are documented there because they fail silently rather than
+loudly: combining `visible_to()` with a count annotation returns wrong numbers
+in **both** directions, and a `Prefetch` override placed on the wrong mixin can
+be shadowed by the MRO and quietly reintroduce an N+1.
 
 ## Assumptions
 

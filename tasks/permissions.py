@@ -40,10 +40,17 @@ class ProjectAccessMixin(PermissionRequiredMixin):
     #: URL kwarg holding the project's primary key.
     project_url_kwarg = 'pk'
 
+    def get_project_queryset(self):
+        """Base queryset for the project. Views that render related rows
+        override this to pull those in at the same time."""
+        # select_related('owner'): every permission check reads owner, and the
+        # templates render the owner's username.
+        return Project.objects.select_related('owner')
+
     @cached_property
     def project(self):
         return get_object_or_404(
-            Project.objects.select_related('owner'),
+            self.get_project_queryset(),
             pk=self.kwargs[self.project_url_kwarg],
         )
 
@@ -69,10 +76,16 @@ class ProjectOwnerRequiredMixin(ProjectAccessMixin):
 class TaskAccessMixin(PermissionRequiredMixin):
     """Resolves the task, and the project whose ownership governs it."""
 
+    def get_task_queryset(self):
+        """Base queryset for the task; overridden where comments are rendered."""
+        # Forward FKs followed on every request: the project (and its owner)
+        # for the permission check, the assignee for display.
+        return Task.objects.select_related('project', 'project__owner', 'assigned_to')
+
     @cached_property
     def task(self):
         return get_object_or_404(
-            Task.objects.select_related('project', 'project__owner', 'assigned_to'),
+            self.get_task_queryset(),
             pk=self.kwargs['pk'],
         )
 

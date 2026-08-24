@@ -15,12 +15,15 @@ Actors used throughout:
 import datetime
 
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
 from .forms import CommentForm
 from .models import Comment, Project, Task
+from .views import ProjectDetailView, TaskDetailView
 
 DUE = datetime.date(2026, 12, 1)
 
@@ -898,3 +901,137 @@ class OverdueFilterTests(TestCase):
         self.client.force_login(self.user)
         response = self.client.get(reverse('dashboard'), {'filter': 'nonsense'})
         self.assertEqual(len(self.shown(response)), 3)
+
+
+class NPlusOneTests(TestCase):
+    """Every page that renders a list must cost a fixed number of queries.
+
+    Each test measures the page, then grows the collection it renders and
+    measures again. A page that issues one query per row fails on the second
+    measurement, which is the only reliable way to catch an N+1 -- a single
+    absolute count says nothing about how it scales.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = User.objects.create_user('nplus_owner', password='pw-for-tests-1')
+        cls.others = [
+            User.objects.create_user(f'nplus_u{i}', password='pw-for-tests-2')
+            for i in range(5)
+        ]
+        cls.project = Project.objects.create(name='Apollo', owner=cls.owner)
+
+    def setUp(self):
+        self.client.force_login(self.owner)
+
+    def add_projects(self, n):
+        for i in range(n):
+            p = Project.objects.create(name=f'Extra {i}', owner=self.owner)
+            Task.objects.create(title=f'seed {i}', due_date=DUE, project=p)
+
+    def add_tasks(self, n):
+        for i in range(n):
+            Task.objects.create(
+                title=f'Task {i}', due_date=DUE, project=self.project,
+                assigned_to=self.others[i % len(self.others)],
+            )
+
+    def add_comments(self, task, n):
+        for i in range(n):
+            Comment.objects.create(
+                task=task, author=self.others[i % len(self.others)],
+                body=f'comment {i}',
+            )
+
+    def assert_constant(self, url, grow):
+        """Assert the page costs the same number of queries before and after
+        the collection it renders doubles."""
+        grow()
+        with CaptureQueriesContext(connection) as before:
+            self.assertEqual(self.client.get(url).status_code, 200)
+
+        grow()
+        with CaptureQueriesContext(connection) as after:
+            self.assertEqual(self.client.get(url).status_code, 200)
+
+        self.assertEqual(
+            len(before), len(after),
+            f'{url} went from {len(before)} to {len(after)} queries when the '
+            f'list doubled -- that is an N+1.',
+        )
+        return len(after)
+
+    def test_project_list_does_not_scale_with_project_count(self):
+        """Renders owner (forward FK) and status counts (aggregate) per row."""
+        self.assert_constant(reverse('project-list'), lambda: self.add_projects(10))
+
+    def test_project_detail_does_not_scale_with_task_count(self):
+        """Renders each task's assignee -- a forward FK on a prefetched list."""
+        self.assert_constant(
+            reverse('project-detail', args=[self.project.pk]),
+            lambda: self.add_tasks(15),
+        )
+
+    def test_task_detail_does_not_scale_with_comment_count(self):
+        """Renders each comment's author.
+
+        This is the one that catches a broken Prefetch: without the inner
+        select_related('author'), comments load in one query but each author
+        costs another.
+        """
+        task = Task.objects.create(
+            title='Discussed', due_date=DUE, project=self.project,
+            assigned_to=self.owner,
+        )
+        self.assert_constant(
+            reverse('task-detail', args=[task.pk]),
+            lambda: self.add_comments(task, 15),
+        )
+
+    def test_dashboard_does_not_scale_with_task_count(self):
+        """Renders each card's project name -- a forward FK."""
+        def grow():
+            for i in range(10):
+                p = Project.objects.create(name=f'Board {i}', owner=self.owner)
+                Task.objects.create(
+                    title=f'Mine {i}', due_date=DUE, project=p,
+                    assigned_to=self.owner,
+                )
+        self.assert_constant(reverse('dashboard'), grow)
+
+    def test_comments_are_prefetched_with_their_authors(self):
+        """Directly pin the Prefetch, independent of the page render.
+
+        TaskPageContextMixin must win the MRO over TaskAccessMixin for this to
+        hold; if the bases are reordered, the prefetch is skipped and this
+        fails.
+        """
+        task = Task.objects.create(
+            title='Discussed', due_date=DUE, project=self.project,
+            assigned_to=self.owner,
+        )
+        self.add_comments(task, 10)
+
+        view = TaskDetailView()
+        view.kwargs = {'pk': task.pk}
+        view.request = None
+        fetched = view.get_task_queryset().get(pk=task.pk)
+
+        # Comments and their authors are already in memory: touching them
+        # must not issue a single further query.
+        with self.assertNumQueries(0):
+            self.assertEqual(
+                len([c.author.username for c in fetched.comments.all()]), 10
+            )
+
+    def test_project_tasks_are_prefetched_with_their_assignees(self):
+        self.add_tasks(10)
+
+        view = ProjectDetailView()
+        view.kwargs = {'pk': self.project.pk}
+        fetched = view.get_project_queryset().get(pk=self.project.pk)
+
+        with self.assertNumQueries(0):
+            self.assertEqual(
+                len([t.assigned_to.username for t in fetched.tasks.all()]), 10
+            )

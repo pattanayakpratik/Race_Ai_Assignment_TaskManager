@@ -1,5 +1,6 @@
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.db.models import Prefetch
 from django.shortcuts import render
 from django.urls import reverse, reverse_lazy
 from django.views.generic import (
@@ -7,7 +8,7 @@ from django.views.generic import (
 )
 
 from .forms import CommentForm, ProjectForm, TaskForm
-from .models import Project, Task
+from .models import Comment, Project, Task
 from .permissions import (
     ProjectMemberRequiredMixin,
     ProjectOwnerRequiredMixin,
@@ -89,17 +90,26 @@ class ProjectDetailView(ProjectMemberRequiredMixin, DetailView):
     template_name = 'tasks/project_detail.html'
     context_object_name = 'project'
 
+    def get_project_queryset(self):
+        # `tasks` is a reverse FK -- a to-many relation -- so it needs
+        # prefetch_related, not select_related. The inner select_related pulls
+        # each task's assignee in the same query, so rendering the assignee
+        # column costs nothing per row.
+        return super().get_project_queryset().prefetch_related(
+            Prefetch(
+                'tasks',
+                queryset=Task.objects.select_related('assigned_to'),
+            )
+        )
+
     def get_object(self, queryset=None):
         # Already fetched by the permission mixin; do not query again.
         return self.project
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        # select_related('assigned_to') keeps the task table to one query
-        # rather than one per row for the assignee column.
-        context['tasks'] = (
-            self.project.tasks.select_related('assigned_to').all()
-        )
+        # .all() reads the prefetch cache -- no query here.
+        context['tasks'] = self.project.tasks.all()
         context['can_edit'] = self.project.is_owned_by(self.request.user)
         # One GROUP BY query for the whole breakdown.
         context['status_counts'] = self.project.status_counts()
@@ -139,24 +149,39 @@ class ProjectDeleteView(ProjectOwnerRequiredMixin, DeleteView):
 # --------------------------------------------------------------------------
 
 class TaskPageContextMixin:
-    """Context for the task page.
+    """Context for the task page, plus the fetching it depends on.
 
     Shared by the detail view and by the comment view that posts to it, so a
     failed comment can be re-rendered on the same page without the two drifting
     apart.
+
+    Must be listed BEFORE the permission mixin in a view's bases: it overrides
+    get_task_queryset(), and TaskAccessMixin defines the same method. Listed
+    after, TaskAccessMixin wins the MRO, the prefetch below never runs, and
+    rendering the comment authors silently becomes N+1.
     """
+
+    def get_task_queryset(self):
+        # `comments` is a reverse FK, so prefetch_related; select_related on
+        # the inner queryset brings each comment's author along with it.
+        return super().get_task_queryset().prefetch_related(
+            Prefetch(
+                'comments',
+                queryset=Comment.objects.select_related('author'),
+            )
+        )
 
     def task_page_context(self):
         return {
             'task': self.task,
-            # One query for all comments plus their authors, rather than one
-            # per comment row.
-            'comments': self.task.comments.select_related('author').all(),
+            # .all() reads the prefetch cache -- no query, and no per-comment
+            # query for the author.
+            'comments': self.task.comments.all(),
             'can_edit': self.project.is_owned_by(self.request.user),
         }
 
 
-class TaskDetailView(TaskViewableRequiredMixin, TaskPageContextMixin, DetailView):
+class TaskDetailView(TaskPageContextMixin, TaskViewableRequiredMixin, DetailView):
     template_name = 'tasks/task_detail.html'
     context_object_name = 'task'
 
@@ -223,7 +248,7 @@ class TaskDeleteView(TaskEditableRequiredMixin, DeleteView):
 # Comments
 # --------------------------------------------------------------------------
 
-class CommentCreateView(TaskViewableRequiredMixin, TaskPageContextMixin, CreateView):
+class CommentCreateView(TaskPageContextMixin, TaskViewableRequiredMixin, CreateView):
     """Append a comment to a task.
 
     Permission is deliberately the *view* rule, not the edit rule: the brief
