@@ -118,7 +118,7 @@ GRANT ALL PRIVILEGES ON `test\_%`.* TO 'taskmanager'@'%';
 
 | URL | Name | Who may reach it |
 | --- | --- | --- |
-| `/` | `dashboard` | Any logged-in user |
+| `/` | `dashboard` | Any logged-in user; shows only their own assignments |
 | `/accounts/register/` | `register` | Anonymous |
 | `/accounts/login/` | `login` | Anonymous |
 | `/accounts/logout/` | `logout` | Logged-in (POST only) |
@@ -133,6 +133,31 @@ GRANT ALL PRIVILEGES ON `test\_%`.* TO 'taskmanager'@'%';
 | `/tasks/<pk>/delete/` | `task-delete` | Project owner |
 | `/tasks/<pk>/comments/new/` | `comment-create` | Project members (POST) |
 | `/admin/` | — | Staff |
+
+## Dashboard
+
+`/` is the logged-in landing page: every task where the user is `assigned_to`,
+in three columns — **To Do / In Progress / Done**. Each card links to the task
+and to its project, shows the due date and priority, and is colour-coded by
+priority down its left edge. Empty columns still render, so the board keeps its
+shape when a user has nothing in progress.
+
+Two details worth noting:
+
+- **One query, grouped in Python.** The view fetches the user's tasks once and
+  buckets the already-loaded rows by status. Three status-filtered querysets
+  would be three round trips for the same set of rows. (This is not the
+  "counting in Python" the brief warns against — that concerns aggregates,
+  which the per-project status counts do in SQL with `annotate`/`Count`.)
+- **The columns come from `Task.Status.choices`**, not a hardcoded list, so the
+  board tracks the model. Adding a status adds a column without editing the
+  view or the template. A test asserts the columns match `Task.Status.values`.
+
+`select_related('project')` is what holds the page at a fixed **3 queries** —
+session, user, tasks — no matter how many cards are on the board; without it,
+each card's project name would cost a query. `test_dashboard_is_a_fixed_number_of_queries`
+pins this with `assertNumQueries`, re-checking after adding 20 tasks across 20
+projects.
 
 ## Permissions
 
@@ -185,8 +210,20 @@ Membership is **derived, not stored**: it is computed from the assignment rows
 each time. Assigning someone a task grants them access to the project, and
 clearing that assignment takes it away again — both directions are tested.
 
-Comments are **append-only**. Only a create route exists; `comment-update` and
-`comment-delete` are absent by design, and a test asserts they do not resolve.
+Comments are **append-only**, and that holds on every path into the model:
+
+- Only a create route exists. `comment-update` / `comment-delete` are absent by
+  design, and a test asserts they do not resolve.
+- `CommentForm` exposes `body` alone, so a comment cannot be retargeted or
+  reattributed by a crafted POST.
+- `CommentAdmin` sets `has_change_permission` and `has_delete_permission` to
+  `False`, which also strips the "delete selected" bulk action. Otherwise the
+  admin would be the one way around the rule. Both are tested by POSTing to the
+  admin endpoints as a superuser and asserting a 403 with the row intact.
+
+The one remaining way a comment disappears is cascade: deleting its task or
+project takes its comments with it. That is intended — the alternative is
+orphaned rows.
 
 Both have tests. `python manage.py test` runs the full suite: every mutating
 endpoint is POSTed as owner, member, outsider, and anonymous, and each test

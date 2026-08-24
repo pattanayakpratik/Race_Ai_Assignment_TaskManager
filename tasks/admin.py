@@ -20,5 +20,19 @@ class TaskAdmin(admin.ModelAdmin):
 
 @admin.register(Comment)
 class CommentAdmin(admin.ModelAdmin):
+    """Comments are append-only here too.
+
+    The app exposes no edit or delete route for a comment, so leaving the admin
+    able to rewrite or remove one would be the only way round that rule. Add
+    and view stay enabled; change and delete are switched off, which also
+    removes the "delete selected" bulk action from the changelist.
+    """
+
     list_display = ['task', 'author', 'created_at']
     list_select_related = ['task', 'author']
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

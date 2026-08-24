@@ -22,11 +22,30 @@
     .linkbutton { background: none; border: none; padding: 0; color: #1a1a1a;
                   text-decoration: underline; cursor: pointer; font: inherit; }
     .helptext, .helptext ul { font-size: .85rem; color: #555; }
+
+    /* Dashboard board: three status columns side by side, stacking on narrow
+       screens rather than overflowing. */
+    .board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    @media (max-width: 45rem) { .board { grid-template-columns: 1fr; } }
+    .column { border: 1px solid #ddd; padding: .75rem; background: #fafafa; }
+    .column h2 { font-size: 1rem; margin: 0 0 .75rem; }
+    .column .count { color: #555; font-weight: normal; }
+    .card { background: #fff; border: 1px solid #ddd; border-left-width: 4px;
+            padding: .5rem .6rem; margin-bottom: .5rem; }
+    .card .meta { font-size: .8rem; color: #555; margin-top: .25rem; }
+    .priority-high { border-left-color: #b00020; }
+    .priority-medium { border-left-color: #b8860b; }
+    .priority-low { border-left-color: #bbb; }
+    .empty { color: #777; font-size: .85rem; }
   </style>
 </head>
 <body>
   <header>
     <a class="brand" href="{% url 'dashboard' %}">Task Manager</a>
+    {% if user.is_authenticated %}
+      <a href="{% url 'dashboard' %}">My tasks</a>
+      <a href="{% url 'project-list' %}">Projects</a>
+    {% endif %}
     <span class="spacer"></span>
     {% if user.is_authenticated %}
       <span>{{ user.username }}</span>

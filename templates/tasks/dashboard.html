@@ -1,10 +1,43 @@
 {% extends 'base.html' %}
 
-{% block title %}Dashboard{% endblock %}
+{% block title %}My tasks{% endblock %}
 
 {% block content %}
-  <h1>Dashboard</h1>
-  <p>Signed in as <strong>{{ user.username }}</strong>.</p>
-  <p>Your tasks, grouped by status, will appear here.</p>
-  <p><a href="{% url 'project-list' %}">Browse projects</a></p>
+  <h1>My tasks</h1>
+  <p>
+    Signed in as <strong>{{ user.username }}</strong> &middot;
+    <a href="{% url 'project-list' %}">Browse projects</a>
+  </p>
+
+  {% if task_count %}
+    <div class="board">
+      {% for column in columns %}
+        <section class="column">
+          <h2>{{ column.label }} <span class="count">{{ column.tasks|length }}</span></h2>
+
+          {% for task in column.tasks %}
+            <article class="card priority-{{ task.priority }}">
+              <a href="{{ task.get_absolute_url }}">{{ task.title }}</a>
+              <div class="meta">
+                {# select_related('project') in the view -- no query per card. #}
+                <a href="{{ task.project.get_absolute_url }}">{{ task.project.name }}</a>
+              </div>
+              <div class="meta">
+                Due {{ task.due_date|date:'Y-m-d' }} &middot;
+                {{ task.get_priority_display }} priority
+              </div>
+            </article>
+          {% empty %}
+            <p class="empty">Nothing here.</p>
+          {% endfor %}
+        </section>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p>
+      No tasks are assigned to you yet. Tasks appear here once someone assigns
+      one to you, or you can <a href="{% url 'project-create' %}">start a
+      project</a> of your own.
+    </p>
+  {% endif %}
 {% endblock %}

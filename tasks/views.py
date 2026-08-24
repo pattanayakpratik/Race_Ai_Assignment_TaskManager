@@ -18,13 +18,38 @@ from .permissions import (
 
 @login_required
 def dashboard(request):
-    """Logged-in landing page.
+    """Logged-in landing page: the current user's tasks, grouped by status.
 
-    Placeholder for now: it exists so login/registration have somewhere to
-    redirect to and so @login_required has something to protect. The real
-    "my tasks grouped by status" content lands with the dashboard work.
+    One query fetches every task assigned to the user; the grouping into
+    columns happens in Python over those already-loaded rows. That is
+    deliberate -- three status-filtered querysets would mean three round trips
+    to fetch the same set of rows.
+
+    select_related('project') is what keeps it to one query: each row renders
+    its project name, which would otherwise be a query per task.
     """
-    return render(request, 'tasks/dashboard.html')
+    tasks = (
+        Task.objects
+        .assigned_to_user(request.user)
+        .select_related('project')
+    )
+
+    # Pre-seed every status so empty columns still render.
+    grouped = {status: [] for status in Task.Status.values}
+    for task in tasks:
+        grouped[task.status].append(task)
+
+    # Task.Status.choices drives the column order, so adding a status to the
+    # model adds a column here without touching this view or the template.
+    columns = [
+        {'status': status, 'label': label, 'tasks': grouped[status]}
+        for status, label in Task.Status.choices
+    ]
+
+    return render(request, 'tasks/dashboard.html', {
+        'columns': columns,
+        'task_count': len(tasks),
+    })
 
 
 # --------------------------------------------------------------------------

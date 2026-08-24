@@ -18,6 +18,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django.urls import NoReverseMatch, reverse
 
+from .forms import CommentForm
 from .models import Comment, Project, Task
 
 DUE = datetime.date(2026, 12, 1)
@@ -475,3 +476,202 @@ class CommentPermissionTests(PermissionTestCase):
             [c.body for c in response.context['comments']],
             ['first', 'second', 'third'],
         )
+
+
+class DashboardTests(TestCase):
+    """The dashboard shows the current user's assignments, grouped by status."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user('dash', password='pw-for-tests-1')
+        cls.colleague = User.objects.create_user('colleague', password='pw-for-tests-2')
+        cls.project = Project.objects.create(name='Apollo', owner=cls.colleague)
+
+        cls.todo = Task.objects.create(
+            title='Mine: todo', due_date=DUE, project=cls.project,
+            assigned_to=cls.user, status=Task.Status.TODO,
+        )
+        cls.in_progress = Task.objects.create(
+            title='Mine: in progress', due_date=DUE, project=cls.project,
+            assigned_to=cls.user, status=Task.Status.IN_PROGRESS,
+        )
+        cls.done = Task.objects.create(
+            title='Mine: done', due_date=DUE, project=cls.project,
+            assigned_to=cls.user, status=Task.Status.DONE,
+        )
+        # Noise the dashboard must exclude.
+        cls.someone_elses = Task.objects.create(
+            title='Not mine', due_date=DUE, project=cls.project,
+            assigned_to=cls.colleague, status=Task.Status.TODO,
+        )
+        cls.unassigned = Task.objects.create(
+            title='Unassigned', due_date=DUE, project=cls.project,
+            status=Task.Status.TODO,
+        )
+
+    def columns(self, response):
+        return {c['label']: list(c['tasks']) for c in response.context['columns']}
+
+    def test_dashboard_requires_login(self):
+        response = self.client.get(reverse('dashboard'))
+        self.assertRedirects(response, f"{reverse('login')}?next={reverse('dashboard')}")
+
+    def test_three_columns_in_workflow_order(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'))
+        self.assertEqual(
+            [c['label'] for c in response.context['columns']],
+            ['To Do', 'In Progress', 'Done'],
+        )
+
+    def test_tasks_land_in_the_column_matching_their_status(self):
+        self.client.force_login(self.user)
+        columns = self.columns(self.client.get(reverse('dashboard')))
+        self.assertEqual(columns['To Do'], [self.todo])
+        self.assertEqual(columns['In Progress'], [self.in_progress])
+        self.assertEqual(columns['Done'], [self.done])
+
+    def test_only_the_current_users_assignments_are_shown(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'))
+        shown = [t for column in response.context['columns'] for t in column['tasks']]
+
+        self.assertNotIn(self.someone_elses, shown)
+        self.assertNotIn(self.unassigned, shown)
+        self.assertEqual(response.context['task_count'], 3)
+
+    def test_each_user_sees_their_own_board(self):
+        self.client.force_login(self.colleague)
+        columns = self.columns(self.client.get(reverse('dashboard')))
+        self.assertEqual(columns['To Do'], [self.someone_elses])
+        self.assertEqual(columns['In Progress'], [])
+
+    def test_empty_columns_still_render(self):
+        """A user with only To Do work still gets all three headings."""
+        Task.objects.filter(
+            pk__in=[self.in_progress.pk, self.done.pk]
+        ).update(assigned_to=None)
+
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'))
+        columns = self.columns(response)
+
+        self.assertEqual(columns['In Progress'], [])
+        self.assertEqual(columns['Done'], [])
+        for label in ('To Do', 'In Progress', 'Done'):
+            self.assertContains(response, label)
+
+    def test_user_with_no_assignments_sees_a_prompt(self):
+        loner = User.objects.create_user('loner', password='pw-for-tests-3')
+        self.client.force_login(loner)
+        response = self.client.get(reverse('dashboard'))
+
+        self.assertEqual(response.context['task_count'], 0)
+        self.assertContains(response, 'No tasks are assigned to you yet')
+
+    def test_columns_follow_the_status_choices(self):
+        """Column order is derived from the model, not hardcoded in the view."""
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'))
+        self.assertEqual(
+            [c['status'] for c in response.context['columns']],
+            list(Task.Status.values),
+        )
+
+    def test_tasks_are_ordered_by_due_date_within_a_column(self):
+        earlier = Task.objects.create(
+            title='Earlier', due_date=DUE - datetime.timedelta(days=7),
+            project=self.project, assigned_to=self.user, status=Task.Status.TODO,
+        )
+        self.client.force_login(self.user)
+        columns = self.columns(self.client.get(reverse('dashboard')))
+        self.assertEqual(columns['To Do'], [earlier, self.todo])
+
+    def test_dashboard_is_a_fixed_number_of_queries(self):
+        """select_related('project') keeps the board off the N+1 path."""
+        self.client.force_login(self.user)
+        with self.assertNumQueries(3):
+            # 1 session, 2 user, 3 the task queryset. Rendering each card's
+            # project name adds nothing.
+            self.client.get(reverse('dashboard'))
+
+        for i in range(20):
+            Task.objects.create(
+                title=f'Extra {i}', due_date=DUE,
+                project=Project.objects.create(name=f'P{i}', owner=self.colleague),
+                assigned_to=self.user, status=Task.Status.TODO,
+            )
+
+        with self.assertNumQueries(3):
+            self.client.get(reverse('dashboard'))
+
+
+class CommentAppendOnlyTests(PermissionTestCase):
+    """No route, form field, or admin screen may edit or remove a comment."""
+
+    def setUp(self):
+        self.comment = Comment.objects.create(
+            task=self.assigned_task, author=self.member, body='permanent',
+        )
+
+    def test_no_edit_or_delete_route_exists(self):
+        for name in ('comment-update', 'comment-delete', 'comment-edit'):
+            with self.subTest(route=name):
+                with self.assertRaises(NoReverseMatch):
+                    reverse(name, args=[self.comment.pk])
+
+    def test_comment_form_exposes_only_the_body(self):
+        """Nothing in the form can retarget or reattribute a comment."""
+        self.assertEqual(list(CommentForm().fields), ['body'])
+
+    def test_posting_again_appends_rather_than_replaces(self):
+        self.client.force_login(self.member)
+        self.client.post(
+            reverse('comment-create', args=[self.assigned_task.pk]),
+            {'body': 'a second thought'},
+        )
+
+        bodies = list(
+            Comment.objects.filter(task=self.assigned_task)
+            .values_list('body', flat=True)
+        )
+        self.assertEqual(bodies, ['permanent', 'a second thought'])
+
+    def test_task_page_offers_no_edit_or_delete_control_for_comments(self):
+        self.client.force_login(self.member)
+        html = self.client.get(
+            reverse('task-detail', args=[self.assigned_task.pk])
+        ).content.decode()
+
+        # The only comment-related form on the page is the append form.
+        self.assertEqual(html.count('comments/new/'), 1)
+        self.assertNotIn(f'comments/{self.comment.pk}', html)
+
+    def test_admin_cannot_change_a_comment(self):
+        admin_user = User.objects.create_superuser(
+            'root', 'root@example.com', 'pw-for-tests-admin'
+        )
+        self.client.force_login(admin_user)
+
+        response = self.client.post(
+            reverse('admin:tasks_comment_change', args=[self.comment.pk]),
+            {'body': 'rewritten by an admin'},
+        )
+        self.comment.refresh_from_db()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.comment.body, 'permanent')
+
+    def test_admin_cannot_delete_a_comment(self):
+        admin_user = User.objects.create_superuser(
+            'root2', 'root2@example.com', 'pw-for-tests-admin'
+        )
+        self.client.force_login(admin_user)
+
+        response = self.client.post(
+            reverse('admin:tasks_comment_delete', args=[self.comment.pk]),
+            {'post': 'yes'},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Comment.objects.filter(pk=self.comment.pk).exists())

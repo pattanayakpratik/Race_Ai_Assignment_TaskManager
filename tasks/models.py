@@ -36,6 +36,10 @@ class TaskQuerySet(models.QuerySet):
         """Tasks the user may edit or delete -- i.e. owns the project of."""
         return self.filter(project__owner=user)
 
+    def assigned_to_user(self, user):
+        """Tasks this user is on the hook for. Backs the dashboard."""
+        return self.filter(assigned_to=user)
+
 
 class Project(models.Model):
     """A container for tasks, owned by exactly one user.
