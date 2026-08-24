@@ -17,6 +17,7 @@ import datetime
 from django.contrib.auth.models import User
 from django.test import TestCase
 from django.urls import NoReverseMatch, reverse
+from django.utils import timezone
 
 from .forms import CommentForm
 from .models import Comment, Project, Task
@@ -590,9 +591,9 @@ class DashboardTests(TestCase):
     def test_dashboard_is_a_fixed_number_of_queries(self):
         """select_related('project') keeps the board off the N+1 path."""
         self.client.force_login(self.user)
-        with self.assertNumQueries(3):
-            # 1 session, 2 user, 3 the task queryset. Rendering each card's
-            # project name adds nothing.
+        # 1 session, 2 user, 3 the overdue COUNT, 4 the task queryset.
+        # Rendering each card's project name and overdue badge adds nothing.
+        with self.assertNumQueries(4):
             self.client.get(reverse('dashboard'))
 
         for i in range(20):
@@ -602,7 +603,7 @@ class DashboardTests(TestCase):
                 assigned_to=self.user, status=Task.Status.TODO,
             )
 
-        with self.assertNumQueries(3):
+        with self.assertNumQueries(4):
             self.client.get(reverse('dashboard'))
 
 
@@ -675,3 +676,225 @@ class CommentAppendOnlyTests(PermissionTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertTrue(Comment.objects.filter(pk=self.comment.pk).exists())
+
+
+class OverdueQueryTests(TestCase):
+    """`due_date < today` AND not Done, in one reusable place."""
+
+    TODAY = datetime.date(2026, 8, 25)
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user('od', password='pw-for-tests-1')
+        cls.project = Project.objects.create(name='Apollo', owner=cls.user)
+
+        def task(title, offset, status):
+            return Task.objects.create(
+                title=title, project=cls.project, assigned_to=cls.user,
+                status=status,
+                due_date=cls.TODAY + datetime.timedelta(days=offset),
+            )
+
+        cls.late_todo = task('late todo', -5, Task.Status.TODO)
+        cls.late_wip = task('late wip', -1, Task.Status.IN_PROGRESS)
+        cls.late_done = task('late done', -5, Task.Status.DONE)
+        cls.due_today = task('due today', 0, Task.Status.TODO)
+        cls.future_todo = task('future todo', 5, Task.Status.TODO)
+
+    def test_overdue_selects_past_due_and_unfinished_only(self):
+        overdue = Task.objects.overdue(today=self.TODAY)
+        self.assertCountEqual(overdue, [self.late_todo, self.late_wip])
+
+    def test_done_tasks_are_never_overdue(self):
+        self.assertNotIn(self.late_done, Task.objects.overdue(today=self.TODAY))
+
+    def test_due_today_is_not_yet_overdue(self):
+        """The rule is `due_date < today`, so today itself does not count."""
+        self.assertNotIn(self.due_today, Task.objects.overdue(today=self.TODAY))
+
+    def test_overdue_is_composable_with_other_filters(self):
+        other = User.objects.create_user('od2', password='pw-for-tests-2')
+        mine = Task.objects.assigned_to_user(self.user).overdue(today=self.TODAY)
+        theirs = Task.objects.assigned_to_user(other).overdue(today=self.TODAY)
+
+        self.assertCountEqual(mine, [self.late_todo, self.late_wip])
+        self.assertEqual(list(theirs), [])
+
+    def test_sql_pins_status_to_discrete_values(self):
+        """`status IN (...)`, not `!= done` -- that is what makes the index usable."""
+        sql = str(Task.objects.overdue(today=self.TODAY).query)
+        self.assertIn('IN (todo, in_progress)', sql)
+        self.assertNotIn('NOT', sql)
+
+    def test_open_statuses_is_derived_from_the_choices(self):
+        self.assertEqual(
+            Task.open_statuses(),
+            [s for s in Task.Status.values if s != Task.Status.DONE],
+        )
+
+    def test_is_overdue_property_matches_the_queryset(self):
+        """The per-row badge and the queryset must agree on the definition."""
+        overdue_pks = set(
+            Task.objects.overdue(today=timezone.localdate())
+            .values_list('pk', flat=True)
+        )
+        for task in Task.objects.all():
+            with self.subTest(task=task.title):
+                self.assertEqual(task.is_overdue, task.pk in overdue_pks)
+
+
+class StatusCountTests(TestCase):
+    """Per-project status totals, counted by the database."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.viewer = User.objects.create_user('viewer', password='pw-for-tests-1')
+        cls.owner = User.objects.create_user('projowner', password='pw-for-tests-2')
+        cls.project = Project.objects.create(name='Apollo', owner=cls.owner)
+
+        # 4 todo (3 of them assigned to viewer), 1 in progress, 1 done.
+        for i in range(3):
+            Task.objects.create(
+                title=f'assigned {i}', due_date=DUE, project=cls.project,
+                status=Task.Status.TODO, assigned_to=cls.viewer,
+            )
+        for title, status in [('spare', Task.Status.TODO),
+                              ('wip', Task.Status.IN_PROGRESS),
+                              ('fin', Task.Status.DONE)]:
+            Task.objects.create(
+                title=title, due_date=DUE, project=cls.project, status=status,
+            )
+
+        cls.truth = {'todo': 4, 'in_progress': 1, 'done': 1}
+
+    def as_dict(self, rows):
+        return {row['status']: row['count'] for row in rows}
+
+    def test_project_status_counts(self):
+        self.assertEqual(self.as_dict(self.project.status_counts()), self.truth)
+
+    def test_status_counts_include_zero_statuses_in_choice_order(self):
+        empty = Project.objects.create(name='Empty', owner=self.owner)
+        rows = empty.status_counts()
+
+        self.assertEqual([r['status'] for r in rows], list(Task.Status.values))
+        self.assertEqual([r['count'] for r in rows], [0, 0, 0])
+        self.assertEqual([r['label'] for r in rows], ['To Do', 'In Progress', 'Done'])
+
+    def test_counting_happens_in_sql_not_python(self):
+        """GROUP BY: one row per status, never the task rows themselves."""
+        qs = Task.objects.filter(project=self.project).status_counts()
+        sql = str(qs.query)
+
+        self.assertIn('GROUP BY', sql)
+        self.assertIn('COUNT', sql)
+        self.assertEqual(len(qs), 3)  # three statuses, not six tasks
+
+    def test_status_counts_is_a_single_query(self):
+        with self.assertNumQueries(1):
+            self.project.status_counts()
+
+    def test_annotated_counts_match(self):
+        row = Project.objects.with_status_counts().get(pk=self.project.pk)
+        self.assertEqual(
+            {s: getattr(row, f'{s}_count') for s in Task.Status.values},
+            self.truth,
+        )
+
+    def test_membership_join_does_not_corrupt_the_counts(self):
+        """The trap: filtering and counting the same relation gives wrong numbers.
+
+        `viewer` sees this project because 3 tasks are assigned to them, so the
+        membership filter joins `tasks`. Chaining the annotation onto that join
+        undercounts (only the matched rows) or multiplies (one row per
+        assignment). visible_to_with_counts() resolves membership to ids first.
+        """
+        row = Project.objects.visible_to_with_counts(self.viewer).get(pk=self.project.pk)
+        self.assertEqual(
+            {s: getattr(row, f'{s}_count') for s in Task.Status.values},
+            self.truth,
+        )
+
+    def test_naive_chaining_is_what_we_avoided(self):
+        """Documents the wrong answers, so a refactor back to them fails here."""
+        undercount = Project.objects.visible_to(self.viewer).with_status_counts().get(
+            pk=self.project.pk
+        )
+        self.assertNotEqual(undercount.todo_count, self.truth['todo'])
+
+        overcount = Project.objects.with_status_counts().visible_to(self.viewer).get(
+            pk=self.project.pk
+        )
+        self.assertNotEqual(overcount.todo_count, self.truth['todo'])
+
+    def test_project_list_counts_are_one_query_regardless_of_size(self):
+        self.client.force_login(self.owner)
+        # session, user, and one query for the whole list: the counts are
+        # annotated in and the membership check is an inlined subquery, so
+        # there is no per-project aggregate.
+        with self.assertNumQueries(3):
+            self.client.get(reverse('project-list'))
+
+        for i in range(10):
+            p = Project.objects.create(name=f'Extra {i}', owner=self.owner)
+            Task.objects.create(title=f't{i}', due_date=DUE, project=p)
+
+        with self.assertNumQueries(3):
+            self.client.get(reverse('project-list'))
+
+
+class OverdueFilterTests(TestCase):
+    """The dashboard surfaces the overdue query as a filter."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user('dashod', password='pw-for-tests-1')
+        cls.project = Project.objects.create(name='Apollo', owner=cls.user)
+        today = timezone.localdate()
+        yesterday = today - datetime.timedelta(days=1)
+        tomorrow = today + datetime.timedelta(days=1)
+
+        cls.late = Task.objects.create(
+            title='Late one', due_date=yesterday, project=cls.project,
+            assigned_to=cls.user, status=Task.Status.TODO,
+        )
+        cls.on_time = Task.objects.create(
+            title='On time', due_date=tomorrow, project=cls.project,
+            assigned_to=cls.user, status=Task.Status.TODO,
+        )
+        cls.late_but_done = Task.objects.create(
+            title='Late but finished', due_date=yesterday, project=cls.project,
+            assigned_to=cls.user, status=Task.Status.DONE,
+        )
+
+    def shown(self, response):
+        return [t for c in response.context['columns'] for t in c['tasks']]
+
+    def test_unfiltered_board_shows_everything(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'))
+        self.assertCountEqual(
+            self.shown(response), [self.late, self.on_time, self.late_but_done]
+        )
+
+    def test_overdue_filter_narrows_the_board(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'), {'filter': 'overdue'})
+        self.assertEqual(self.shown(response), [self.late])
+
+    def test_overdue_count_reflects_the_whole_board_not_the_filter(self):
+        self.client.force_login(self.user)
+        for params in ({}, {'filter': 'overdue'}):
+            with self.subTest(params=params):
+                response = self.client.get(reverse('dashboard'), params)
+                self.assertEqual(response.context['overdue_count'], 1)
+
+    def test_overdue_badge_is_rendered(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'))
+        self.assertContains(response, 'Overdue')
+
+    def test_unrecognised_filter_value_shows_everything(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('dashboard'), {'filter': 'nonsense'})
+        self.assertEqual(len(self.shown(response)), 3)

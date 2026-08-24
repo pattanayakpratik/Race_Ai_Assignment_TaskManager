@@ -9,7 +9,11 @@
   {% if projects %}
     <table>
       <thead>
-        <tr><th>Name</th><th>Owner</th><th>Created</th></tr>
+        <tr>
+          <th>Name</th><th>Owner</th>
+          <th>To Do</th><th>In Progress</th><th>Done</th>
+          <th>Created</th>
+        </tr>
       </thead>
       <tbody>
         {% for project in projects %}
@@ -17,6 +21,10 @@
             <td><a href="{{ project.get_absolute_url }}">{{ project.name }}</a></td>
             {# select_related('owner') in the view -- no query per row here. #}
             <td>{{ project.owner.username }}</td>
+            {# Annotated in the same query -- no aggregate per row. #}
+            <td>{{ project.todo_count }}</td>
+            <td>{{ project.in_progress_count }}</td>
+            <td>{{ project.done_count }}</td>
             <td>{{ project.created_at|date:'Y-m-d' }}</td>
           </tr>
         {% endfor %}

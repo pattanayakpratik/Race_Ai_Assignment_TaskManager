@@ -20,6 +20,13 @@
   {% endif %}
 
   <h2>Tasks</h2>
+
+  {# Counted by the database in one GROUP BY, not by walking the task list. #}
+  <p class="counts">
+    {% for row in status_counts %}
+      {{ row.label }}: <strong>{{ row.count }}</strong>{% if not forloop.last %} &middot; {% endif %}
+    {% endfor %}
+  </p>
   {% if tasks %}
     <table>
       <thead>

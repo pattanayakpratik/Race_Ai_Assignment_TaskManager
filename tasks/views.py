@@ -34,6 +34,16 @@ def dashboard(request):
         .select_related('project')
     )
 
+    # "Overdue" filter: narrows the board to work that is late, using the one
+    # reusable overdue() definition on the queryset.
+    show_overdue_only = request.GET.get('filter') == 'overdue'
+    if show_overdue_only:
+        tasks = tasks.overdue()
+
+    # Counted in the database, not by walking the rows above -- the board may
+    # already be filtered, and this figure must reflect the whole board.
+    overdue_count = Task.objects.assigned_to_user(request.user).overdue().count()
+
     # Pre-seed every status so empty columns still render.
     grouped = {status: [] for status in Task.Status.values}
     for task in tasks:
@@ -49,6 +59,8 @@ def dashboard(request):
     return render(request, 'tasks/dashboard.html', {
         'columns': columns,
         'task_count': len(tasks),
+        'overdue_count': overdue_count,
+        'show_overdue_only': show_overdue_only,
     })
 
 
@@ -64,8 +76,13 @@ class ProjectListView(LoginRequiredMixin, ListView):
 
     def get_queryset(self):
         # select_related('owner') so rendering the owner column does not issue
-        # one query per row.
-        return Project.objects.visible_to(self.request.user).select_related('owner')
+        # one query per row; visible_to_with_counts() adds the per-status
+        # totals in the same query rather than one aggregate per project.
+        return (
+            Project.objects
+            .visible_to_with_counts(self.request.user)
+            .select_related('owner')
+        )
 
 
 class ProjectDetailView(ProjectMemberRequiredMixin, DetailView):
@@ -84,6 +101,8 @@ class ProjectDetailView(ProjectMemberRequiredMixin, DetailView):
             self.project.tasks.select_related('assigned_to').all()
         )
         context['can_edit'] = self.project.is_owned_by(self.request.user)
+        # One GROUP BY query for the whole breakdown.
+        context['status_counts'] = self.project.status_counts()
         return context
 
 

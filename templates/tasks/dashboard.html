@@ -9,6 +9,20 @@
     <a href="{% url 'project-list' %}">Browse projects</a>
   </p>
 
+  <p class="filters">
+    {% if show_overdue_only %}
+      <a href="{% url 'dashboard' %}">Show all</a> &middot;
+      <strong>Overdue only ({{ overdue_count }})</strong>
+    {% else %}
+      <strong>All</strong> &middot;
+      {% if overdue_count %}
+        <a href="{% url 'dashboard' %}?filter=overdue">Overdue ({{ overdue_count }})</a>
+      {% else %}
+        <span class="empty">Nothing overdue</span>
+      {% endif %}
+    {% endif %}
+  </p>
+
   {% if task_count %}
     <div class="board">
       {% for column in columns %}
@@ -25,6 +39,8 @@
               <div class="meta">
                 Due {{ task.due_date|date:'Y-m-d' }} &middot;
                 {{ task.get_priority_display }} priority
+                {# is_overdue is pure Python on a loaded row: no query. #}
+                {% if task.is_overdue %}<span class="overdue">Overdue</span>{% endif %}
               </div>
             </article>
           {% empty %}
@@ -34,10 +50,14 @@
       {% endfor %}
     </div>
   {% else %}
-    <p>
-      No tasks are assigned to you yet. Tasks appear here once someone assigns
-      one to you, or you can <a href="{% url 'project-create' %}">start a
-      project</a> of your own.
-    </p>
+    {% if show_overdue_only %}
+      <p>Nothing of yours is overdue. <a href="{% url 'dashboard' %}">Show all tasks</a>.</p>
+    {% else %}
+      <p>
+        No tasks are assigned to you yet. Tasks appear here once someone assigns
+        one to you, or you can <a href="{% url 'project-create' %}">start a
+        project</a> of your own.
+      </p>
+    {% endif %}
   {% endif %}
 {% endblock %}

@@ -229,6 +229,93 @@ Both have tests. `python manage.py test` runs the full suite: every mutating
 endpoint is POSTed as owner, member, outsider, and anonymous, and each test
 asserts the database is *unchanged*, not merely that a 403 came back.
 
+## Required queries
+
+Both live as queryset methods on [`tasks/models.py`](tasks/models.py), so there
+is one definition each and views compose against it.
+
+### Overdue tasks
+
+```python
+Task.objects.overdue()                        # every overdue task
+Task.objects.assigned_to_user(user).overdue() # mine, as the dashboard uses it
+```
+
+```sql
+SELECT ... FROM `tasks_task`
+WHERE (`due_date` < '2026-08-25' AND `status` IN ('todo', 'in_progress'))
+ORDER BY `due_date` ASC, `id` ASC
+```
+
+```
+EXPLAIN: type=range  key=task_status_due_date_idx  Using index condition
+```
+
+Surfaced as an **Overdue filter on the dashboard** (`/?filter=overdue`), with a
+count in the toggle and a red badge on late cards. The badge uses an
+`is_overdue` property that re-states the same rule in Python on an
+already-loaded row, so it costs no queries; a test asserts the property and the
+queryset never disagree.
+
+Written as `status__in=[...]` rather than `.exclude(status=DONE)` — that is
+what makes the index usable, and it is measured in the index section below. The
+status list comes from `Task.open_statuses()`, derived from the choices, so
+adding a status keeps the query correct.
+
+### Per-project status counts
+
+For one project (used on the project detail page):
+
+```python
+Task.objects.filter(project=project).values('status').annotate(count=Count('id'))
+```
+
+```sql
+SELECT `status`, COUNT(`id`) AS `count` FROM `tasks_task`
+WHERE `project_id` = 46 GROUP BY 1 ORDER BY 1 ASC
+```
+
+Three rows come back for six tasks — the database groups and counts; Python
+only fills in a zero for any status with no tasks, and orders by the choices.
+
+For a list of projects (used on the project list page), conditional
+aggregation puts every count in the same query:
+
+```python
+Project.objects.with_status_counts()   # todo_count, in_progress_count, done_count
+```
+
+```sql
+SELECT `tasks_project`.*,
+       COUNT(CASE WHEN `tasks_task`.`status` = 'todo' THEN `tasks_task`.`id` END) AS `todo_count`,
+       COUNT(CASE WHEN `tasks_task`.`status` = 'in_progress' THEN ... END) AS `in_progress_count`,
+       COUNT(CASE WHEN `tasks_task`.`status` = 'done' THEN ... END) AS `done_count`
+FROM `tasks_project` LEFT OUTER JOIN `tasks_task` ON (...)
+GROUP BY `tasks_project`.`id`
+```
+
+The whole project list is **3 queries** regardless of how many projects it
+holds, pinned by `assertNumQueries`.
+
+#### The trap this hides
+
+`visible_to()` joins `tasks` to work out membership, and the count annotation
+aggregates over `tasks` too. Combining them directly gives wrong numbers **in
+both directions**. Measured against a project holding 4 To Do / 1 In Progress /
+1 Done, viewed by a user assigned 3 of those tasks:
+
+| Expression | todo / in_progress / done | |
+| --- | --- | --- |
+| `with_status_counts()` alone | 4 / 1 / 1 | correct |
+| `visible_to(u).with_status_counts()` | 3 / 0 / 0 | **undercount** — the annotation reuses the membership join, so it only counts rows that satisfied the assignment filter |
+| `with_status_counts().visible_to(u)` | 12 / 3 / 3 | **overcount** — the join fans out to one row per assignment, tripling every count |
+| `visible_to_with_counts(u)` | 4 / 1 / 1 | correct |
+
+`visible_to_with_counts()` resolves membership to a set of ids first, which
+leaves the annotation a single clean join. Both wrong forms are pinned by a test
+(`test_naive_chaining_is_what_we_avoided`) so a future refactor back to them
+fails loudly rather than silently reporting bad numbers.
+
 ## The one deliberate index
 
 Beyond the primary keys and the indexes Django creates automatically for foreign
@@ -321,6 +408,9 @@ Decisions made where the brief left room; kept here as they accumulate.
   see the work their task depends on.
 - **Failed permission checks return 403, not 404.** Hiding a resource's
   existence was not asked for, and 403 makes the enforcement legible in tests.
+- **"Overdue" is judged against `timezone.localdate()`**, which with
+  `TIME_ZONE = 'UTC'` means the UTC date. Due dates are plain dates with no
+  per-user timezone, so one consistent clock is the honest reading.
 
 ## Troubleshooting
 
