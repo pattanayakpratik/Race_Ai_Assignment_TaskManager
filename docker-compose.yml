@@ -25,6 +25,10 @@ services:
       - --collation-server=utf8mb4_0900_ai_ci
     volumes:
       - mysql_data:/var/lib/mysql
+      # Runs once, on first initialisation of an empty data directory. Grants
+      # the app user rights over test_* databases so `manage.py test` can
+      # create its throwaway database.
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # Waits until the server actually accepts connections, so
       # `docker compose up -d --wait` is enough before running migrate.

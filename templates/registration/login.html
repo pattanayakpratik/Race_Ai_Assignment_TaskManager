@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+
+{% block title %}Log in{% endblock %}
+
+{% block content %}
+  <h1>Log in</h1>
+
+  {% if form.non_field_errors %}
+    <ul class="errorlist">
+      {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    {# Carries ?next= through so @login_required returns you where you were. #}
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit">Log in</button>
+  </form>
+
+  <p>No account yet? <a href="{% url 'register' %}">Register</a>.</p>
+{% endblock %}

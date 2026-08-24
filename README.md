@@ -98,6 +98,32 @@ python manage.py runserver
 The app is then at http://127.0.0.1:8000/ and the admin at
 http://127.0.0.1:8000/admin/.
 
+### 5. Run the tests (optional)
+
+```bash
+python manage.py test
+```
+
+Django builds a throwaway `test_taskmanager` database for this. The Compose
+setup grants the app user rights over `test_*` databases via
+[`docker/mysql-init/`](docker/mysql-init/), which MySQL runs on first
+initialisation. If you are pointing at your own MySQL instead, grant it
+yourself:
+
+```sql
+GRANT ALL PRIVILEGES ON `test\_%`.* TO 'taskmanager'@'%';
+```
+
+## Routes
+
+| URL | Name | Purpose |
+| --- | --- | --- |
+| `/` | `dashboard` | Logged-in landing page (login required) |
+| `/accounts/register/` | `register` | Create an account |
+| `/accounts/login/` | `login` | `django.contrib.auth.views.LoginView` |
+| `/accounts/logout/` | `logout` | `django.contrib.auth.views.LogoutView` (POST) |
+| `/admin/` | — | Django admin |
+
 ## The one deliberate index
 
 Beyond the primary keys and the indexes Django creates automatically for foreign
@@ -167,6 +193,18 @@ Decisions made where the brief left room; kept here as they accumulate.
   detail.
 - Both models carry `created_at` / `updated_at`; comments carry `created_at`
   only, since they are append-only.
+- **Auth is Django's, not hand-rolled.** `LoginView` and `LogoutView` are used
+  directly. Django ships no registration view, so `accounts.views.RegisterView`
+  is a thin `CreateView` over the stock `UserCreationForm` — password
+  validation and hashing stay with `django.contrib.auth`.
+- **Only login / logout / register are wired.** Including
+  `django.contrib.auth.urls` would also expose the password change and reset
+  flows, which are out of scope and would raise `TemplateDoesNotExist` if
+  followed, so the three required routes are registered explicitly instead.
+- **Registration signs the new user straight in** rather than bouncing them to
+  the login form.
+- **Logging out is a POST.** `LogoutView` has rejected GET since Django 5.0, so
+  the header uses a small form rather than a link.
 
 ## Troubleshooting
 
