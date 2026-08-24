@@ -105,6 +105,22 @@ Decisions made where the brief left room; kept here as they accumulate.
 - Host port **3307** for MySQL, to avoid clashing with a local MySQL install.
 - `sql_mode=STRICT_TRANS_TABLES` is set on connect, so out-of-range or truncated
   values raise instead of being silently coerced.
+- **`due_date` is required.** The brief marks only `assigned_to` as nullable, so
+  every task carries a due date. This also keeps the overdue query free of
+  `NULL` handling.
+- **Losing a user does not lose the work.** `Task.assigned_to` is `SET_NULL`, so
+  deleting a user leaves their tasks in place, unassigned. `Project.owner`,
+  `Comment.author`, and the two containment FKs (`Task.project`,
+  `Comment.task`) cascade.
+- **Choices are stored as readable strings** (`todo`, `in_progress`, `done`)
+  via `TextChoices`, so raw SQL output stays legible. Reordering or inserting a
+  choice later cannot silently reinterpret existing rows the way integer codes
+  would.
+- **`description` on both `Project` and `Task`** is `blank=True`, an addition to
+  the brief's field list; a task list is hard to use without somewhere to put
+  detail.
+- Both models carry `created_at` / `updated_at`; comments carry `created_at`
+  only, since they are append-only.
 
 ## Troubleshooting
 
