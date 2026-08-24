@@ -21,4 +21,12 @@ urlpatterns = [
     path('tasks/<int:pk>/', views.TaskDetailView.as_view(), name='task-detail'),
     path('tasks/<int:pk>/edit/', views.TaskUpdateView.as_view(), name='task-update'),
     path('tasks/<int:pk>/delete/', views.TaskDeleteView.as_view(), name='task-delete'),
+
+    # Comments are append-only, so create is the only route. The form lives on
+    # the task detail page and posts here.
+    path(
+        'tasks/<int:pk>/comments/new/',
+        views.CommentCreateView.as_view(),
+        name='comment-create',
+    ),
 ]

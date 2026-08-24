@@ -1,6 +1,6 @@
 from django import forms
 
-from .models import Project, Task
+from .models import Comment, Project, Task
 
 
 class ProjectForm(forms.ModelForm):
@@ -29,3 +29,13 @@ class TaskForm(forms.ModelForm):
         # The brief is explicit that a task may be assigned to any user, not
         # just the project owner or existing members.
         self.fields['assigned_to'].empty_label = 'Unassigned'
+
+
+class CommentForm(forms.ModelForm):
+    class Meta:
+        model = Comment
+        # Only the body is user-supplied. `task` comes from the URL and
+        # `author` from request.user, so neither can be forged in a POST.
+        fields = ['body']
+        widgets = {'body': forms.Textarea(attrs={'rows': 3})}
+        labels = {'body': 'Add a comment'}

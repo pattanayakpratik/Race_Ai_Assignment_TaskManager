@@ -131,6 +131,7 @@ GRANT ALL PRIVILEGES ON `test\_%`.* TO 'taskmanager'@'%';
 | `/tasks/<pk>/` | `task-detail` | Project members |
 | `/tasks/<pk>/edit/` | `task-update` | Project owner |
 | `/tasks/<pk>/delete/` | `task-delete` | Project owner |
+| `/tasks/<pk>/comments/new/` | `comment-create` | Project members (POST) |
 | `/admin/` | — | Staff |
 
 ## Permissions
@@ -148,6 +149,7 @@ enforced once in [`tasks/permissions.py`](tasks/permissions.py):
 | --- | :-: | :-: | :-: | :-: |
 | View project / its tasks | yes | yes | 403 | → login |
 | Create / edit / delete task | yes | 403 | 403 | → login |
+| Comment on a task | yes | yes | 403 | → login |
 | Edit / delete project | yes | 403 | 403 | → login |
 
 Creating a project is open to any logged-in user, who becomes its owner.
@@ -166,6 +168,25 @@ reach them:
   owned by someone else.
 - `Task.project` comes from the URL, so you cannot move a task into a project
   you do not own — which would otherwise be a way to write into it.
+- `Comment.author` is set from `request.user` and `Comment.task` from the URL,
+  so a comment cannot be posted under someone else's name or onto a task you
+  cannot see.
+
+### Commenting follows the *view* rule
+
+`CommentCreateView` is guarded by `TaskViewableRequiredMixin`, not the edit
+mixin — the brief says any authenticated user who can view a task can comment
+on it. So a member can comment on a task assigned to somebody else, or on one
+they have no right to edit, while a non-member is refused. There is a test that
+pins exactly this: the same user, on the same task, is allowed to comment and
+refused an edit.
+
+Membership is **derived, not stored**: it is computed from the assignment rows
+each time. Assigning someone a task grants them access to the project, and
+clearing that assignment takes it away again — both directions are tested.
+
+Comments are **append-only**. Only a create route exists; `comment-update` and
+`comment-delete` are absent by design, and a test asserts they do not resolve.
 
 Both have tests. `python manage.py test` runs the full suite: every mutating
 endpoint is POSTed as owner, member, outsider, and anonymous, and each test

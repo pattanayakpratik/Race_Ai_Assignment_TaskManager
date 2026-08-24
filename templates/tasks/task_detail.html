@@ -34,4 +34,12 @@
   {% empty %}
     <p>No comments yet.</p>
   {% endfor %}
+
+  {# Every user who can see this page can comment, so no permission guard
+     here. The view checks membership regardless of what is rendered. #}
+  <form method="post" action="{% url 'comment-create' task.pk %}">
+    {% csrf_token %}
+    {{ comment_form.as_p }}
+    <button type="submit">Add comment</button>
+  </form>
 {% endblock %}

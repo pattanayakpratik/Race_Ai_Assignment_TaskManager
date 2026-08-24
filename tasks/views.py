@@ -6,7 +6,7 @@ from django.views.generic import (
     CreateView, DeleteView, DetailView, ListView, UpdateView,
 )
 
-from .forms import ProjectForm, TaskForm
+from .forms import CommentForm, ProjectForm, TaskForm
 from .models import Project, Task
 from .permissions import (
     ProjectMemberRequiredMixin,
@@ -94,7 +94,25 @@ class ProjectDeleteView(ProjectOwnerRequiredMixin, DeleteView):
 # Tasks
 # --------------------------------------------------------------------------
 
-class TaskDetailView(TaskViewableRequiredMixin, DetailView):
+class TaskPageContextMixin:
+    """Context for the task page.
+
+    Shared by the detail view and by the comment view that posts to it, so a
+    failed comment can be re-rendered on the same page without the two drifting
+    apart.
+    """
+
+    def task_page_context(self):
+        return {
+            'task': self.task,
+            # One query for all comments plus their authors, rather than one
+            # per comment row.
+            'comments': self.task.comments.select_related('author').all(),
+            'can_edit': self.project.is_owned_by(self.request.user),
+        }
+
+
+class TaskDetailView(TaskViewableRequiredMixin, TaskPageContextMixin, DetailView):
     template_name = 'tasks/task_detail.html'
     context_object_name = 'task'
 
@@ -103,10 +121,10 @@ class TaskDetailView(TaskViewableRequiredMixin, DetailView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        # One query for all comments, plus their authors, instead of one per
-        # comment row.
-        context['comments'] = self.task.comments.select_related('author').all()
-        context['can_edit'] = self.project.is_owned_by(self.request.user)
+        context.update(self.task_page_context())
+        # Anyone who can see the task can comment on it, so the form is always
+        # rendered here.
+        context.setdefault('comment_form', CommentForm())
         return context
 
 
@@ -155,3 +173,40 @@ class TaskDeleteView(TaskEditableRequiredMixin, DeleteView):
 
     def get_success_url(self):
         return reverse('project-detail', args=[self.project.pk])
+
+
+# --------------------------------------------------------------------------
+# Comments
+# --------------------------------------------------------------------------
+
+class CommentCreateView(TaskViewableRequiredMixin, TaskPageContextMixin, CreateView):
+    """Append a comment to a task.
+
+    Permission is deliberately the *view* rule, not the edit rule: the brief
+    says any authenticated user who can view a task can comment on it. So
+    project members can comment on tasks they cannot edit -- including tasks
+    assigned to someone else -- while non-members are refused.
+
+    POST only: the form itself lives on the task detail page.
+    """
+
+    form_class = CommentForm
+    template_name = 'tasks/task_detail.html'
+    http_method_names = ['post']
+
+    def form_valid(self, form):
+        # Both FKs are set server-side, never from the submitted data.
+        form.instance.task = self.task
+        form.instance.author = self.request.user
+        return super().form_valid(form)
+
+    def get_success_url(self):
+        return self.task.get_absolute_url()
+
+    def get_context_data(self, **kwargs):
+        # Only reached when the form is invalid (e.g. an empty body): re-render
+        # the task page with the bound form so the errors are visible.
+        context = super().get_context_data(**kwargs)
+        context.update(self.task_page_context())
+        context['comment_form'] = context['form']
+        return context

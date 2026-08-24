@@ -16,7 +16,7 @@ import datetime
 
 from django.contrib.auth.models import User
 from django.test import TestCase
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 
 from .models import Comment, Project, Task
 
@@ -317,3 +317,161 @@ class CascadeTests(PermissionTestCase):
 
         self.assertFalse(Task.objects.filter(project=self.project).exists())
         self.assertFalse(Comment.objects.filter(task=self.assigned_task).exists())
+
+
+class MemberAccessTests(PermissionTestCase):
+    """The membership rule: owner, or anyone assigned a task in the project."""
+
+    def test_assignment_is_what_confers_membership(self):
+        """Before assignment the user is an outsider; after it, a member."""
+        stranger = User.objects.create_user('stranger', password='pw-for-tests-4')
+        url = reverse('project-detail', args=[self.project.pk])
+
+        self.client.force_login(stranger)
+        self.assertEqual(self.client.get(url).status_code, 403)
+
+        self.other_task.assigned_to = stranger
+        self.other_task.save(update_fields=['assigned_to'])
+
+        self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_unassignment_revokes_membership(self):
+        """Membership is derived, not stored, so removing the assignment removes access."""
+        url = reverse('project-detail', args=[self.project.pk])
+
+        self.client.force_login(self.member)
+        self.assertEqual(self.client.get(url).status_code, 200)
+
+        self.assigned_task.assigned_to = None
+        self.assigned_task.save(update_fields=['assigned_to'])
+
+        self.assertEqual(self.client.get(url).status_code, 403)
+
+    def test_member_sees_every_task_in_the_project(self):
+        """Including tasks assigned to someone else, or to nobody."""
+        self.client.force_login(self.member)
+        response = self.client.get(
+            reverse('project-detail', args=[self.project.pk])
+        )
+        listed = list(response.context['tasks'])
+        self.assertIn(self.assigned_task, listed)
+        self.assertIn(self.other_task, listed)
+
+
+class CommentPermissionTests(PermissionTestCase):
+    """Anyone who can view a task can comment on it -- view rule, not edit rule."""
+
+    def comment_url(self, task):
+        return reverse('comment-create', args=[task.pk])
+
+    def test_owner_can_comment(self):
+        self.client.force_login(self.owner)
+        response = self.client.post(
+            self.comment_url(self.assigned_task), {'body': 'From the owner'}
+        )
+        self.assertRedirects(response, self.assigned_task.get_absolute_url())
+        self.assertEqual(
+            Comment.objects.get(body='From the owner').author, self.owner
+        )
+
+    def test_member_can_comment_on_their_own_task(self):
+        self.client.force_login(self.member)
+        self.client.post(
+            self.comment_url(self.assigned_task), {'body': 'From the assignee'}
+        )
+        self.assertEqual(
+            Comment.objects.get(body='From the assignee').author, self.member
+        )
+
+    def test_member_can_comment_on_a_task_they_cannot_edit(self):
+        """The point of the rule: comment access follows viewing, not ownership."""
+        self.client.force_login(self.member)
+        self.client.post(
+            self.comment_url(self.other_task), {'body': 'On someone elses task'}
+        )
+        comment = Comment.objects.get(body='On someone elses task')
+        self.assertEqual(comment.task, self.other_task)
+
+        # Same user, same task: commenting allowed, editing still refused.
+        response = self.client.post(
+            reverse('task-update', args=[self.other_task.pk]),
+            self.task_payload(),
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_outsider_cannot_comment(self):
+        self.client.force_login(self.outsider)
+        response = self.client.post(
+            self.comment_url(self.assigned_task), {'body': 'Should not land'}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(Comment.objects.filter(body='Should not land').exists())
+
+    def test_anonymous_cannot_comment(self):
+        response = self.client.post(
+            self.comment_url(self.assigned_task), {'body': 'Should not land'}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Comment.objects.filter(body='Should not land').exists())
+
+    def test_author_cannot_be_spoofed(self):
+        """`author` is not a form field; it is always request.user."""
+        self.client.force_login(self.member)
+        self.client.post(self.comment_url(self.assigned_task), {
+            'body': 'Spoof attempt', 'author': self.owner.pk,
+        })
+        self.assertEqual(
+            Comment.objects.get(body='Spoof attempt').author, self.member
+        )
+
+    def test_task_cannot_be_spoofed(self):
+        """`task` comes from the URL, so a POST cannot redirect the comment."""
+        foreign_task = Task.objects.create(
+            title='Foreign', due_date=DUE, project=self.foreign_project,
+        )
+        self.client.force_login(self.member)
+        self.client.post(self.comment_url(self.assigned_task), {
+            'body': 'Wrong task', 'task': foreign_task.pk,
+        })
+        self.assertEqual(
+            Comment.objects.get(body='Wrong task').task, self.assigned_task
+        )
+
+    def test_empty_comment_is_rejected(self):
+        self.client.force_login(self.member)
+        response = self.client.post(self.comment_url(self.assigned_task), {'body': ''})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Comment.objects.filter(task=self.assigned_task).exists())
+        self.assertTrue(response.context['comment_form'].errors)
+
+    def test_comment_form_is_shown_to_every_member(self):
+        for user in (self.owner, self.member):
+            with self.subTest(user=user.username):
+                self.client.force_login(user)
+                response = self.client.get(
+                    reverse('task-detail', args=[self.assigned_task.pk])
+                )
+                self.assertContains(response, self.comment_url(self.assigned_task))
+
+    def test_comments_are_append_only(self):
+        """No edit or delete route exists for a comment, by design."""
+        comment = Comment.objects.create(
+            task=self.assigned_task, author=self.member, body='permanent'
+        )
+        for name in ('comment-update', 'comment-delete'):
+            with self.subTest(route=name):
+                with self.assertRaises(NoReverseMatch):
+                    reverse(name, args=[comment.pk])
+
+    def test_comments_appear_in_chronological_order(self):
+        self.client.force_login(self.member)
+        for body in ('first', 'second', 'third'):
+            self.client.post(self.comment_url(self.assigned_task), {'body': body})
+
+        response = self.client.get(
+            reverse('task-detail', args=[self.assigned_task.pk])
+        )
+        self.assertEqual(
+            [c.body for c in response.context['comments']],
+            ['first', 'second', 'third'],
+        )
