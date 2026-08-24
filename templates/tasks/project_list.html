@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+
+{% block title %}Projects{% endblock %}
+
+{% block content %}
+  <h1>Projects</h1>
+  <p><a href="{% url 'project-create' %}">New project</a></p>
+
+  {% if projects %}
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Owner</th><th>Created</th></tr>
+      </thead>
+      <tbody>
+        {% for project in projects %}
+          <tr>
+            <td><a href="{{ project.get_absolute_url }}">{{ project.name }}</a></td>
+            {# select_related('owner') in the view -- no query per row here. #}
+            <td>{{ project.owner.username }}</td>
+            <td>{{ project.created_at|date:'Y-m-d' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>You are not a member of any projects yet.</p>
+  {% endif %}
+{% endblock %}

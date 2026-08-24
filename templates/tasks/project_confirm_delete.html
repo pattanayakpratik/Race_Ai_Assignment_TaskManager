@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+
+{% block title %}Delete {{ project.name }}{% endblock %}
+
+{% block content %}
+  <h1>Delete project</h1>
+  <p>
+    Delete <strong>{{ project.name }}</strong>? Its tasks and their comments
+    will be deleted too. This cannot be undone.
+  </p>
+
+  <form method="post">
+    {% csrf_token %}
+    <button type="submit">Delete</button>
+    <a href="{{ project.get_absolute_url }}">Cancel</a>
+  </form>
+{% endblock %}

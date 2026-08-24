@@ -1,5 +1,40 @@
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
+from django.urls import reverse
+
+
+class ProjectQuerySet(models.QuerySet):
+    """Membership rules live here so views and templates cannot drift apart."""
+
+    def visible_to(self, user):
+        """Projects the user owns, or is assigned at least one task in.
+
+        This is the definition of "project member" used throughout the app.
+        `distinct()` is required because the join to tasks yields one row per
+        matching task.
+        """
+        return self.filter(
+            Q(owner=user) | Q(tasks__assigned_to=user)
+        ).distinct()
+
+    def owned_by(self, user):
+        """Projects the user may edit or delete."""
+        return self.filter(owner=user)
+
+
+class TaskQuerySet(models.QuerySet):
+    def visible_to(self, user):
+        """Tasks in any project the user is a member of.
+
+        Note this is project-wide, not just the user's own assignments: being
+        assigned one task in a project grants visibility of all of them.
+        """
+        return self.filter(project__in=Project.objects.visible_to(user))
+
+    def editable_by(self, user):
+        """Tasks the user may edit or delete -- i.e. owns the project of."""
+        return self.filter(project__owner=user)
 
 
 class Project(models.Model):
@@ -19,11 +54,24 @@ class Project(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = ProjectQuerySet.as_manager()
+
     class Meta:
         ordering = ['-created_at']
 
     def __str__(self):
         return self.name
+
+    def get_absolute_url(self):
+        return reverse('project-detail', args=[self.pk])
+
+    def is_owned_by(self, user):
+        """May this user edit or delete the project and the tasks inside it?"""
+        return self.owner_id == user.pk
+
+    def is_member(self, user):
+        """May this user view the project and its tasks?"""
+        return self.is_owned_by(user) or self.tasks.filter(assigned_to=user).exists()
 
 
 class Task(models.Model):
@@ -69,6 +117,8 @@ class Task(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    objects = TaskQuerySet.as_manager()
+
     class Meta:
         ordering = ['due_date', 'id']
         indexes = [
@@ -89,6 +139,9 @@ class Task(models.Model):
 
     def __str__(self):
         return self.title
+
+    def get_absolute_url(self):
+        return reverse('task-detail', args=[self.pk])
 
 
 class Comment(models.Model):

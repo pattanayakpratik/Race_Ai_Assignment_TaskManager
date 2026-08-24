@@ -1,0 +1,37 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ task.title }}{% endblock %}
+
+{% block content %}
+  <p><a href="{{ task.project.get_absolute_url }}">&larr; {{ task.project.name }}</a></p>
+
+  <h1>{{ task.title }}</h1>
+
+  <dl>
+    <dt>Status</dt><dd>{{ task.get_status_display }}</dd>
+    <dt>Priority</dt><dd>{{ task.get_priority_display }}</dd>
+    <dt>Due</dt><dd>{{ task.due_date|date:'Y-m-d' }}</dd>
+    <dt>Assignee</dt><dd>{{ task.assigned_to.username|default:'Unassigned' }}</dd>
+  </dl>
+
+  {% if task.description %}<p>{{ task.description|linebreaksbr }}</p>{% endif %}
+
+  {% if can_edit %}
+    <p>
+      <a href="{% url 'task-update' task.pk %}">Edit task</a> &middot;
+      <a href="{% url 'task-delete' task.pk %}">Delete task</a>
+    </p>
+  {% endif %}
+
+  <h2>Comments</h2>
+  {% for comment in comments %}
+    {# select_related('author') in the view -- no query per comment. #}
+    <p>
+      <strong>{{ comment.author.username }}</strong>
+      <em>{{ comment.created_at|date:'Y-m-d H:i' }}</em><br>
+      {{ comment.body|linebreaksbr }}
+    </p>
+  {% empty %}
+    <p>No comments yet.</p>
+  {% endfor %}
+{% endblock %}

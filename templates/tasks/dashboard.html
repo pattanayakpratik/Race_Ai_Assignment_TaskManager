@@ -6,4 +6,5 @@
   <h1>Dashboard</h1>
   <p>Signed in as <strong>{{ user.username }}</strong>.</p>
   <p>Your tasks, grouped by status, will appear here.</p>
+  <p><a href="{% url 'project-list' %}">Browse projects</a></p>
 {% endblock %}

@@ -1,0 +1,16 @@
+{% extends 'base.html' %}
+
+{% block title %}{% if form.instance.pk %}Edit task{% else %}New task{% endif %}{% endblock %}
+
+{% block content %}
+  <p><a href="{{ project.get_absolute_url }}">&larr; {{ project.name }}</a></p>
+
+  <h1>{% if form.instance.pk %}Edit task{% else %}New task{% endif %}</h1>
+
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Save</button>
+    <a href="{{ project.get_absolute_url }}">Cancel</a>
+  </form>
+{% endblock %}

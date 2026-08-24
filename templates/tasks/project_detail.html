@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ project.name }}{% endblock %}
+
+{% block content %}
+  <p><a href="{% url 'project-list' %}">&larr; All projects</a></p>
+
+  <h1>{{ project.name }}</h1>
+  <p>Owned by <strong>{{ project.owner.username }}</strong></p>
+  {% if project.description %}<p>{{ project.description|linebreaksbr }}</p>{% endif %}
+
+  {# Buttons are hidden for non-owners as a convenience only; the views
+     enforce the rule independently of what is rendered here. #}
+  {% if can_edit %}
+    <p>
+      <a href="{% url 'project-update' project.pk %}">Edit project</a> &middot;
+      <a href="{% url 'project-delete' project.pk %}">Delete project</a> &middot;
+      <a href="{% url 'task-create' project.pk %}">Add task</a>
+    </p>
+  {% endif %}
+
+  <h2>Tasks</h2>
+  {% if tasks %}
+    <table>
+      <thead>
+        <tr><th>Title</th><th>Status</th><th>Priority</th><th>Due</th><th>Assignee</th></tr>
+      </thead>
+      <tbody>
+        {% for task in tasks %}
+          <tr>
+            <td><a href="{{ task.get_absolute_url }}">{{ task.title }}</a></td>
+            <td>{{ task.get_status_display }}</td>
+            <td>{{ task.get_priority_display }}</td>
+            <td>{{ task.due_date|date:'Y-m-d' }}</td>
+            {# select_related('assigned_to') in the view -- no query per row. #}
+            <td>{{ task.assigned_to.username|default:'Unassigned' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>No tasks in this project yet.</p>
+  {% endif %}
+{% endblock %}

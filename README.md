@@ -116,13 +116,60 @@ GRANT ALL PRIVILEGES ON `test\_%`.* TO 'taskmanager'@'%';
 
 ## Routes
 
-| URL | Name | Purpose |
+| URL | Name | Who may reach it |
 | --- | --- | --- |
-| `/` | `dashboard` | Logged-in landing page (login required) |
-| `/accounts/register/` | `register` | Create an account |
-| `/accounts/login/` | `login` | `django.contrib.auth.views.LoginView` |
-| `/accounts/logout/` | `logout` | `django.contrib.auth.views.LogoutView` (POST) |
-| `/admin/` | — | Django admin |
+| `/` | `dashboard` | Any logged-in user |
+| `/accounts/register/` | `register` | Anonymous |
+| `/accounts/login/` | `login` | Anonymous |
+| `/accounts/logout/` | `logout` | Logged-in (POST only) |
+| `/projects/` | `project-list` | Logged-in; lists only your projects |
+| `/projects/new/` | `project-create` | Any logged-in user |
+| `/projects/<pk>/` | `project-detail` | Project members |
+| `/projects/<pk>/edit/` | `project-update` | Project owner |
+| `/projects/<pk>/delete/` | `project-delete` | Project owner |
+| `/projects/<pk>/tasks/new/` | `task-create` | Project owner |
+| `/tasks/<pk>/` | `task-detail` | Project members |
+| `/tasks/<pk>/edit/` | `task-update` | Project owner |
+| `/tasks/<pk>/delete/` | `task-delete` | Project owner |
+| `/admin/` | — | Staff |
+
+## Permissions
+
+Two roles, both defined once in [`tasks/models.py`](tasks/models.py) and
+enforced once in [`tasks/permissions.py`](tasks/permissions.py):
+
+- **Owner** — the user in `Project.owner`. The only user who may edit or delete
+  the project, or create, edit, and delete tasks inside it.
+- **Member** — the owner, *or* any user assigned at least one task in the
+  project (`Project.objects.visible_to()`). Members may view the project and
+  **all** of its tasks, not only the ones assigned to them.
+
+| Action | Owner | Member | Other user | Anonymous |
+| --- | :-: | :-: | :-: | :-: |
+| View project / its tasks | yes | yes | 403 | → login |
+| Create / edit / delete task | yes | 403 | 403 | → login |
+| Edit / delete project | yes | 403 | 403 | → login |
+
+Creating a project is open to any logged-in user, who becomes its owner.
+
+**Enforcement happens in `dispatch()`**, before the view body or the form runs,
+so it applies identically to GET and POST. A direct POST from a non-owner is
+rejected whatever the templates chose to render; the `{% if can_edit %}` guards
+in the templates only hide buttons and are never the control. An authenticated
+user who fails a check gets **403** — not a redirect, and not a 404: they
+exist, they are simply not allowed.
+
+Two fields are deliberately kept out of their forms so a crafted POST cannot
+reach them:
+
+- `Project.owner` is set from `request.user`, so you cannot create a project
+  owned by someone else.
+- `Task.project` comes from the URL, so you cannot move a task into a project
+  you do not own — which would otherwise be a way to write into it.
+
+Both have tests. `python manage.py test` runs the full suite: every mutating
+endpoint is POSTed as owner, member, outsider, and anonymous, and each test
+asserts the database is *unchanged*, not merely that a 403 came back.
 
 ## The one deliberate index
 
@@ -205,6 +252,17 @@ Decisions made where the brief left room; kept here as they accumulate.
   the login form.
 - **Logging out is a POST.** `LogoutView` has rejected GET since Django 5.0, so
   the header uses a small form rather than a link.
+- **Membership is "owner, or assigned a task in the project".** The brief left
+  the definition open. This one needs no extra model or join table: assigning a
+  task is already the act that brings someone into a project.
+- **Creating a task is owner-only.** The brief specifies owner-only edit and
+  delete but is silent on create. Letting a member add a task they could not
+  then change or remove would be the odd case, so create follows the same rule.
+- **Membership grants project-wide read.** Someone assigned one task can see
+  every task in that project, not just their own — otherwise they could not
+  see the work their task depends on.
+- **Failed permission checks return 403, not 404.** Hiding a resource's
+  existence was not asked for, and 403 makes the enforcement legible in tests.
 
 ## Troubleshooting
 
