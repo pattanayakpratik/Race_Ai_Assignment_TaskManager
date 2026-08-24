@@ -71,6 +71,21 @@ class Task(models.Model):
 
     class Meta:
         ordering = ['due_date', 'id']
+        indexes = [
+            # The one deliberate index in this project: it serves the
+            # overdue-tasks query (open status, due_date in the past).
+            #
+            # Column order matters. The query must express the status filter
+            # as `status__in=[todo, in_progress]`, not `!= done`. With an
+            # inequality on the leading column MySQL cannot pin it to discrete
+            # values, so due_date is unusable as a second key and the plan
+            # degrades to a full scan. See the write-up for measured EXPLAIN
+            # output on both forms.
+            models.Index(
+                fields=['status', 'due_date'],
+                name='task_status_due_date_idx',
+            ),
+        ]
 
     def __str__(self):
         return self.title

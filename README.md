@@ -98,6 +98,52 @@ python manage.py runserver
 The app is then at http://127.0.0.1:8000/ and the admin at
 http://127.0.0.1:8000/admin/.
 
+## The one deliberate index
+
+Beyond the primary keys and the indexes Django creates automatically for foreign
+keys, the schema adds exactly one index, on `Task`:
+
+```python
+models.Index(fields=['status', 'due_date'], name='task_status_due_date_idx')
+```
+
+It exists to serve the **overdue-tasks query** — open tasks whose `due_date` has
+passed — which is the app's hottest non-trivial read (it backs the dashboard's
+Overdue filter) and the only required query that filters on something other than
+a foreign key. `(status, due_date)` is the right order because `status` is
+matched against discrete values and `due_date` is a range: MySQL can only use a
+range column as a key after every preceding column is pinned to constants.
+
+**Measured on 50,000 tasks** (~2.9% overdue-and-open, the realistic shape — most
+tasks end up Done and most open work is not yet due):
+
+| Query form | Index chosen | Rows examined | Extra |
+| --- | --- | --- | --- |
+| `.exclude(status=DONE)` | none | 49,989 | `Using where` |
+| `.filter(status__in=[TODO, IN_PROGRESS])` | `task_status_due_date_idx` | **1,457** | `Using index condition` |
+| same, `COUNT(*)` only | `task_status_due_date_idx` | 1,457 | `Using index` (covering) |
+| same, with `IGNORE INDEX` | none | 49,989 | `Using where` |
+
+Two things that surfaced while measuring, both worth stating plainly:
+
+1. **Phrasing decides whether the index is used at all.** `!= 'done'` is an
+   inequality on the leading column, so MySQL cannot reduce it to discrete
+   values and `due_date` becomes unusable as a second key — it falls back to a
+   full scan. Written as `status__in=[TODO, IN_PROGRESS]` it examines 1,457 rows
+   instead of 49,989, a 34x reduction. The reusable query helper therefore uses
+   `status__in`, not `exclude`.
+2. **Selectivity decides whether the index is worth it.** On an earlier,
+   uniformly-random seed where 33% of rows matched, MySQL correctly ignored the
+   index — at that hit rate a scan beats index lookups plus row fetches. The
+   index pays off precisely because overdue-and-open is a small minority in real
+   data, which is the case worth optimising for.
+
+Runner-up considered and rejected: `(assigned_to, status, due_date)`, which
+would also serve the dashboard's "my tasks". It was rejected because
+`assigned_to` already carries an automatic FK index that handles the dashboard's
+equality filter, and because the overdue query is defined project-wide rather
+than per-user, so a leading `assigned_to` column would not apply to it.
+
 ## Assumptions
 
 Decisions made where the brief left room; kept here as they accumulate.
